@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "FamGuard - Family, in sync",
+  "short_name": "FamGuard",
+  "description": "FamGuard keeps your family connected and in sync.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#fbf6f4",
+  "theme_color": "#a33c50",
+  "icons": [
+    {
+      "src": "/famguard-icon.jfif",
+      "sizes": "1024x1024",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    }
+  ]
+}

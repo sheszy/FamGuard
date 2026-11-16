@@ -1,0 +1,18 @@
+{
+  "name": "famguard-pwa",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/server": "^1.9.2",
+    "@supabase/supabase-js": "^2.57.4"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}
