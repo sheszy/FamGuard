@@ -11,6 +11,8 @@ const locationToggle = document.getElementById('route-toggle');
 const locationCopy = document.getElementById('route-copy');
 const locationStatus = document.getElementById('route-status');
 const locationUpdateStatus = document.getElementById('location-update-status');
+const homeLocationBadge = document.getElementById('home-location-badge');
+const homeLocationStatus = document.getElementById('home-location-status');
 const taskIds = new Set();
 const calendarEventIds = new Set();
 let user = null;
@@ -30,6 +32,10 @@ function updateLocationUi(enabled, message) {
   locationCopy.textContent = enabled ? 'Location tracking is on' : 'Location tracking is off';
   locationStatus.textContent = enabled ? 'Location tracking is on' : 'Location tracking is off';
   locationUpdateStatus.textContent = message;
+  homeLocationBadge.textContent = enabled ? 'On' : 'Off';
+  homeLocationStatus.textContent = enabled
+    ? 'Tracking is on for this device. Its location is saved only to your account, not shared with family.'
+    : 'Tracking is off. Turn it on from Locations when you want to save this device’s location.';
 }
 
 async function stopLocationTracking({ removeSaved = true, userId = user?.id } = {}) {
