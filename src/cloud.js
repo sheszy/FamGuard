@@ -40,6 +40,25 @@ function setStatus(message) {
   cloudStatus.textContent = message;
 }
 
+function getLocationTrackingPreference(userId) {
+  if (!userId) return false;
+  try {
+    const saved = localStorage.getItem(`famguard-location-tracking:${userId}`);
+    return saved === null ? true : saved === 'true';
+  } catch {
+    return true;
+  }
+}
+
+function setLocationTrackingPreference(enabled, userId = user?.id) {
+  if (!userId) return;
+  try {
+    localStorage.setItem(`famguard-location-tracking:${userId}`, String(enabled));
+  } catch {
+    window.toast('The location tracking preference could not be saved on this device.');
+  }
+}
+
 function updateLocationUi(enabled, message) {
   locationToggle.checked = enabled;
   locationCopy.textContent = enabled ? 'Location tracking is on' : 'Location tracking is off';
@@ -152,6 +171,7 @@ function startLocationTracking() {
   }, error => {
     if (locationWatchId === null || user?.id !== trackingUserId) return;
     if (error.code === 1) {
+      setLocationTrackingPreference(false, trackingUserId);
       void stopLocationTracking({ userId: trackingUserId });
       locationUpdateStatus.textContent = 'Location permission was denied. Allow access in your browser settings and try again.';
     } else {
@@ -277,6 +297,7 @@ function openProfileDialog({ required = false } = {}) {
       profilePromptUserId = null;
       renderProfile();
       close();
+      if (getLocationTrackingPreference(activeUser.id)) startLocationTracking();
       await Promise.all([loadFamilyData(), loadFamilyLocations()]);
       subscribeToFamilyUpdates();
       startFamilyRefresh(activeUser.id);
@@ -313,6 +334,7 @@ async function loadProfile({ promptOnMissing = true } = {}) {
   renderProfile();
   if (profile) {
     profilePromptUserId = null;
+    if (getLocationTrackingPreference(activeUser.id)) startLocationTracking();
   } else if (promptOnMissing && profilePromptUserId !== activeUser.id) {
     profilePromptUserId = activeUser.id;
     openProfileDialog({ required: true });
@@ -473,12 +495,10 @@ async function loadFamilyData() {
   return true;
 }
 
-function hideLocationMap(message = 'Choose a current location to display its map pin.') {
+function hideLocationMap() {
   const map = document.getElementById('live-map');
   map.hidden = true;
   map.removeAttribute('src');
-  document.getElementById('map-placeholder').hidden = false;
-  document.getElementById('map-placeholder').textContent = message;
   mappedLocationVersion = '';
 }
 
@@ -488,7 +508,6 @@ function showLocationOnMap(location, name, { force = false } = {}) {
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
 
   const map = document.getElementById('live-map');
-  const placeholder = document.getElementById('map-placeholder');
   const version = `${location.user_id}:${latitude.toFixed(5)}:${longitude.toFixed(5)}`;
   const now = Date.now();
   const shouldReload = force || map.hidden || version !== mappedLocationVersion
@@ -509,7 +528,6 @@ function showLocationOnMap(location, name, { force = false } = {}) {
   }
   map.title = `${name}’s location on OpenStreetMap`;
   map.hidden = false;
-  placeholder.hidden = true;
 }
 
 function renderFamilyLocations() {
@@ -518,7 +536,7 @@ function renderFamilyLocations() {
   const status = document.getElementById('live-family-status');
   if (!user || !profile) {
     status.textContent = 'Sign in and complete your profile to see locations.';
-    hideLocationMap('Sign in and complete your profile to see a map pin.');
+    hideLocationMap();
     return;
   }
   status.textContent = familyMembers.length
@@ -560,14 +578,21 @@ function renderFamilyLocations() {
     list.append(row);
   });
 
-  if (!sharedLocations.some(row => row.user_id === selectedLocationUserId)) {
-    selectedLocationUserId = null;
-    hideLocationMap();
-  } else {
-    const current = sharedLocations.find(row => row.user_id === selectedLocationUserId);
-    const member = entries.find(entry => entry.user_id === selectedLocationUserId);
-    if (current && member) showLocationOnMap(current, member.display_name);
+  const current = sharedLocations.find(row => row.user_id === selectedLocationUserId);
+  if (selectedLocationUserId && !current) selectedLocationUserId = null;
+  const selected = current && entries.find(entry => entry.user_id === selectedLocationUserId);
+  if (current && selected) {
+    showLocationOnMap(current, selected.display_name);
+    return;
   }
+
+  const defaultLocation = sharedLocations.find(row => row.user_id === user.id)
+    || familyMembers
+      .map(member => sharedLocations.find(row => row.user_id === member.member_id))
+      .find(Boolean);
+  const defaultMember = defaultLocation && entries.find(entry => entry.user_id === defaultLocation.user_id);
+  if (defaultLocation && defaultMember) showLocationOnMap(defaultLocation, defaultMember.display_name);
+  else hideLocationMap();
 }
 
 async function loadFamilyLocations({ silent = false } = {}) {
@@ -980,7 +1005,7 @@ async function loadSession(session) {
     sharedLocations = [];
     profilePromptUserId = null;
     selectedLocationUserId = null;
-    hideLocationMap('Sign in and complete your profile to see a map pin.');
+    hideLocationMap();
     if (locationWatchId !== null) await stopLocationTracking({ removeSaved: false });
     taskIds.clear();
     calendarEventIds.clear();
@@ -1119,6 +1144,7 @@ document.getElementById('copy-family-code').addEventListener('click', copyFamily
 document.getElementById('family-code-form').addEventListener('submit', event => void submitFamilyCode(event));
 shareLocationToggle.addEventListener('change', updateLocationSharing);
 locationToggle.addEventListener('change', () => {
+  setLocationTrackingPreference(locationToggle.checked);
   if (locationToggle.checked) startLocationTracking();
   else void stopLocationTracking();
 });
