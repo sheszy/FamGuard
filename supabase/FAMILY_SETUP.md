@@ -30,6 +30,8 @@ Enable browser notifications in **Settings & tasks** and choose a built-in SOS t
 
 Use **Export All Events** or an event's **Sync to Phone Calendar** action to download an `.ics` file. Event-specific **Add to Google Calendar** links provide a Google Calendar alternative. Calendar exports use the event's description, location, and optional end time; an event without an end time defaults to a one-hour duration when timed.
 
+For direct Google Calendar sync, enable the Google Calendar API in the Google Cloud project used by Supabase OAuth and add `https://www.googleapis.com/auth/calendar.events` to the OAuth consent screen's Data Access scopes. FamGuard requests this scope during Google sign-in. Users who signed in before the scope was added should sign out and sign in with Google again to grant it. Direct sync uses the active Google provider token and reports expired or missing-token errors; email/password sessions do not have a Google Calendar token.
+
 ## SOS test checklist
 
 1. Apply `supabase/schema.sql` and sign in to two accepted family accounts in separate browsers/devices.

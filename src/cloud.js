@@ -1,10 +1,6 @@
-import { createClient } from '@supabase/supabase-js';
 import { playNotificationSound, stopNotificationSound } from './notificationSound.js';
+import { supabase } from './supabaseClient.js';
 
-const env = import.meta.env;
-const supabaseUrl = env.VITE_SUPABASE_URL?.trim();
-const supabaseKey = env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim() || env.VITE_SUPABASE_ANON_KEY?.trim();
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 const cloudStatus = document.getElementById('cloud-status');
 const accountButton = document.getElementById('account-button');
 const signOutButton = document.getElementById('sign-out-button');
@@ -882,7 +878,11 @@ function openAccountDialog() {
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo: window.location.origin }
+        options: {
+          redirectTo: window.location.origin,
+          scopes: 'https://www.googleapis.com/auth/calendar.events',
+          queryParams: { access_type: 'offline', prompt: 'consent' }
+        }
       });
       if (error) {
         button.disabled = false;
