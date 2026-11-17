@@ -8,8 +8,10 @@ const cloudStatus = document.getElementById('cloud-status');
 const accountButton = document.getElementById('account-button');
 const signOutButton = document.getElementById('sign-out-button');
 const taskIds = new Set();
+const calendarEventIds = new Set();
 let user = null;
 let taskQueue = Promise.resolve();
+let calendarQueue = Promise.resolve();
 let alertChannel;
 
 function setStatus(message) {
@@ -95,7 +97,8 @@ function syncTasks() {
     id: task.id,
     user_id: user.id,
     title: task.text,
-    is_complete: task.done
+    is_complete: task.done,
+    scheduled_for: task.scheduledFor || null
   }));
   const currentIds = new Set(rows.map(row => row.id));
 
@@ -117,7 +120,7 @@ function syncTasks() {
 }
 
 async function loadTasks() {
-  const { data, error } = await supabase.from('tasks').select('id,title,is_complete').order('created_at');
+  const { data, error } = await supabase.from('tasks').select('id,title,is_complete,scheduled_for').order('created_at');
   if (error) {
     setStatus(`Signed in, but database setup needs attention: ${error.message}`);
     return;
@@ -127,12 +130,81 @@ async function loadTasks() {
   window.famguardTasks.splice(0, window.famguardTasks.length, ...data.map(row => ({
     id: row.id,
     text: row.title,
-    done: row.is_complete
+    done: row.is_complete,
+    scheduledFor: row.scheduled_for
   })));
   taskIds.clear();
   data.forEach(row => taskIds.add(row.id));
   window.famguardRenderTasks();
   window.famguardHydrating = false;
+}
+
+function syncCalendarEvents() {
+  if (!user || window.famguardHydrating) return;
+
+  const activeUser = user;
+  const rows = window.famguardCalendarEvents.map(event => ({
+    id: event.id,
+    user_id: activeUser.id,
+    title: event.title,
+    event_date: event.date,
+    event_type: event.type,
+    is_recurring: event.recurring,
+    person_name: event.personName || null,
+    event_time: event.time || null
+  }));
+  const currentIds = new Set(rows.map(row => row.id));
+
+  calendarQueue = calendarQueue.then(async () => {
+    if (user?.id !== activeUser.id) return;
+    if (rows.length) {
+      const { error } = await supabase.from('family_events').upsert(rows, { onConflict: 'id' });
+      if (error) throw error;
+    }
+
+    const removedIds = [...calendarEventIds].filter(id => !currentIds.has(id));
+    if (removedIds.length) {
+      const { error } = await supabase.from('family_events').delete().in('id', removedIds).eq('user_id', activeUser.id);
+      if (error) throw error;
+    }
+
+    calendarEventIds.clear();
+    currentIds.forEach(id => calendarEventIds.add(id));
+  }).catch(error => {
+    setStatus(`Calendar sync failed: ${error.message}`);
+    window.toast(`Calendar sync failed: ${error.message}`);
+  });
+}
+
+async function loadCalendarEvents() {
+  const activeUser = user;
+  const { data, error } = await supabase
+    .from('family_events')
+    .select('id,title,event_date,event_type,is_recurring,person_name,event_time')
+    .order('event_date');
+  if (user?.id !== activeUser?.id) return;
+  if (error) {
+    setStatus(`Signed in, but calendar setup needs attention: ${error.message}`);
+    window.toast(`Calendar could not load: ${error.message}. Run the updated supabase/schema.sql.`);
+    return;
+  }
+
+  calendarEventIds.clear();
+  const merged = new Map();
+  data.forEach(row => {
+    calendarEventIds.add(row.id);
+    merged.set(row.id, {
+      id: row.id,
+      title: row.title,
+      date: row.event_date,
+      type: row.event_type,
+      recurring: row.is_recurring,
+      personName: row.person_name || '',
+      time: row.event_time?.slice(0, 5) || ''
+    });
+  });
+  window.famguardCalendarEvents.forEach(event => merged.set(event.id, event));
+  window.famguardSetCalendarEvents([...merged.values()]);
 }
 
 function renderPosts(rows) {
@@ -178,7 +250,7 @@ function subscribeToAlerts() {
       if ('Notification' in window && Notification.permission === 'granted') {
         navigator.serviceWorker?.ready.then(registration => registration.showNotification(alert.title, {
           body: alert.message,
-          icon: '/famguard-icon.jfif'
+          icon: '/famguard-icon.png'
         }));
       } else {
         window.notify();
@@ -187,7 +259,13 @@ function subscribeToAlerts() {
 }
 
 async function loadSession(session) {
-  user = session?.user || null;
+  const nextUser = session?.user || null;
+  if (user?.id !== nextUser?.id) {
+    taskIds.clear();
+    calendarEventIds.clear();
+  }
+  window.famguardSetCalendarOwner(nextUser?.id || null);
+  user = nextUser;
   window.famguardUser = user;
   renderAccount();
   if (!user) {
@@ -203,6 +281,7 @@ async function loadSession(session) {
   }
 
   await loadTasks();
+  await loadCalendarEvents();
   await loadPosts();
   subscribeToAlerts();
 }
@@ -298,6 +377,7 @@ document.getElementById('sign-out-button').addEventListener('click', async () =>
 });
 document.getElementById('enable-notifications').addEventListener('click', requestNotifications);
 window.addEventListener('famguard:tasks-changed', syncTasks);
+window.addEventListener('famguard:calendar-events-changed', syncCalendarEvents);
 
 if (supabase) {
   renderAccount();

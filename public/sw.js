@@ -1,5 +1,5 @@
-const CACHE_NAME = 'famguard-shell-v1';
-const SHELL_FILES = ['/', '/manifest.webmanifest', '/famguard-icon.jfif'];
+const CACHE_NAME = 'famguard-shell-v5';
+const SHELL_FILES = ['/', '/manifest.webmanifest', '/famguard-icon.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL_FILES)));
@@ -43,8 +43,8 @@ self.addEventListener('push', event => {
 
   event.waitUntil(self.registration.showNotification(payload.title, {
     body: payload.body,
-    icon: '/famguard-icon.jfif',
-    badge: '/famguard-icon.jfif',
+    icon: '/famguard-icon.png',
+    badge: '/famguard-icon.png',
     data: { url: payload.url || '/' }
   }));
 });

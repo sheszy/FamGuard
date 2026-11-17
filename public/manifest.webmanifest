@@ -7,13 +7,13 @@
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#fbf6f4",
-  "theme_color": "#a33c50",
+  "background_color": "#fff4f4",
+  "theme_color": "#641d37",
   "icons": [
     {
-      "src": "/famguard-icon.jfif",
-      "sizes": "1024x1024",
-      "type": "image/jpeg",
+      "src": "/famguard-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]
