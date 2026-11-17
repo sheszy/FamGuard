@@ -11,17 +11,30 @@ const locationToggle = document.getElementById('route-toggle');
 const locationCopy = document.getElementById('route-copy');
 const locationStatus = document.getElementById('route-status');
 const locationUpdateStatus = document.getElementById('location-update-status');
+const shareLocationToggle = document.getElementById('share-location-toggle');
 const homeLocationBadge = document.getElementById('home-location-badge');
 const homeLocationStatus = document.getElementById('home-location-status');
 const taskIds = new Set();
 const calendarEventIds = new Set();
 let user = null;
+let profile = null;
+let familyMembers = [];
+let familyRequests = [];
+let sharedLocations = [];
 let taskQueue = Promise.resolve();
 let calendarQueue = Promise.resolve();
 let locationQueue = Promise.resolve();
 let locationWatchId = null;
+let locationHeartbeatTimer = null;
+let latestLocationCoordinates = null;
 let lastLocationWriteAt = 0;
 let alertChannel;
+let familyChannel;
+let familyRefreshTimer;
+let sessionLoadSequence = 0;
+let profilePromptUserId = null;
+let selectedLocationUserId = null;
+let mappedLocationVersion = '';
 
 function setStatus(message) {
   cloudStatus.textContent = message;
@@ -34,7 +47,9 @@ function updateLocationUi(enabled, message) {
   locationUpdateStatus.textContent = message;
   homeLocationBadge.textContent = enabled ? 'On' : 'Off';
   homeLocationStatus.textContent = enabled
-    ? 'Tracking is on for this device. Its location is saved only to your account, not shared with family.'
+    ? profile?.share_location
+      ? 'Tracking and family sharing are on. Only accepted members can see this device’s location.'
+      : 'Tracking is on for this device. Its location is saved only to your account.'
     : 'Tracking is off. Turn it on from Locations when you want to save this device’s location.';
 }
 
@@ -42,6 +57,9 @@ async function stopLocationTracking({ removeSaved = true, userId = user?.id } = 
   if (locationWatchId !== null && navigator.geolocation) {
     navigator.geolocation.clearWatch(locationWatchId);
   }
+  if (locationHeartbeatTimer) clearInterval(locationHeartbeatTimer);
+  locationHeartbeatTimer = null;
+  latestLocationCoordinates = null;
   locationWatchId = null;
   lastLocationWriteAt = 0;
   updateLocationUi(false, 'Location tracking is off.');
@@ -65,12 +83,50 @@ async function stopLocationTracking({ removeSaved = true, userId = user?.id } = 
     }
   );
   await locationQueue;
+  if (user?.id === userId) await loadFamilyLocations({ silent: true });
+}
+
+function queueLocationWrite(trackingUserId, coordinates) {
+  const now = Date.now();
+  if (now - lastLocationWriteAt < 30000) return;
+  lastLocationWriteAt = now;
+  const row = {
+    user_id: trackingUserId,
+    latitude: coordinates.latitude,
+    longitude: coordinates.longitude,
+    updated_at: new Date(now).toISOString()
+  };
+  locationQueue = locationQueue.then(async () => {
+    if (locationWatchId === null || user?.id !== trackingUserId) return;
+    const { error } = await supabase.from('locations').upsert(row, { onConflict: 'user_id' });
+    if (error) {
+      void stopLocationTracking({ removeSaved: false });
+      updateLocationUi(false, `Location update failed: ${error.message}`);
+      window.toast(`Location update failed: ${error.message}`);
+      return;
+    }
+    locationUpdateStatus.textContent = profile?.share_location
+      ? `Location shared with accepted family at ${new Date(row.updated_at).toLocaleTimeString()}.`
+      : `Location saved privately at ${new Date(row.updated_at).toLocaleTimeString()}.`;
+    void loadFamilyLocations({ silent: true });
+  }).catch(error => {
+    if (user?.id !== trackingUserId) return;
+    const message = error instanceof Error ? error.message : String(error);
+    void stopLocationTracking({ removeSaved: false });
+    updateLocationUi(false, `Location update failed: ${message}`);
+    window.toast(`Location update failed: ${message}`);
+  });
 }
 
 function startLocationTracking() {
   if (!supabase || !user) {
     updateLocationUi(false, 'Sign in to save this device’s location to your account.');
     window.toast('Sign in before starting location tracking.');
+    return;
+  }
+  if (!profile) {
+    updateLocationUi(false, 'Complete your profile before starting location tracking.');
+    window.toast('Complete your profile before enabling location tracking.');
     return;
   }
   if (!window.isSecureContext || !navigator.geolocation) {
@@ -82,37 +138,17 @@ function startLocationTracking() {
 
   const trackingUserId = user.id;
   lastLocationWriteAt = 0;
-  updateLocationUi(true, 'Waiting for a location fix. Coordinates are saved privately to your account.');
+  latestLocationCoordinates = null;
+  updateLocationUi(true, profile.share_location
+    ? 'Waiting for a location fix. Recent coordinates will be visible to accepted family members.'
+    : 'Waiting for a location fix. Coordinates are saved privately to your account.');
   locationWatchId = navigator.geolocation.watchPosition(position => {
     if (locationWatchId === null || user?.id !== trackingUserId) return;
-
-    const now = Date.now();
-    if (now - lastLocationWriteAt < 30000) return;
-    lastLocationWriteAt = now;
-    const row = {
-      user_id: trackingUserId,
+    latestLocationCoordinates = {
       latitude: position.coords.latitude,
-      longitude: position.coords.longitude,
-      updated_at: new Date(now).toISOString()
+      longitude: position.coords.longitude
     };
-
-    locationQueue = locationQueue.then(async () => {
-      if (locationWatchId === null || user?.id !== trackingUserId) return;
-      const { error } = await supabase.from('locations').upsert(row, { onConflict: 'user_id' });
-      if (error) {
-        void stopLocationTracking({ removeSaved: false });
-        updateLocationUi(false, `Location update failed: ${error.message}`);
-        window.toast(`Location update failed: ${error.message}`);
-        return;
-      }
-      locationUpdateStatus.textContent = `Location saved privately at ${new Date(row.updated_at).toLocaleTimeString()}.`;
-    }).catch(error => {
-      if (user?.id !== trackingUserId) return;
-      const message = error instanceof Error ? error.message : String(error);
-      void stopLocationTracking({ removeSaved: false });
-      updateLocationUi(false, `Location update failed: ${message}`);
-      window.toast(`Location update failed: ${message}`);
-    });
+    queueLocationWrite(trackingUserId, latestLocationCoordinates);
   }, error => {
     if (locationWatchId === null || user?.id !== trackingUserId) return;
     if (error.code === 1) {
@@ -127,6 +163,549 @@ function startLocationTracking() {
     timeout: 15000,
     maximumAge: 10000
   });
+  locationHeartbeatTimer = setInterval(() => {
+    if (locationWatchId !== null && user?.id === trackingUserId && latestLocationCoordinates) {
+      queueLocationWrite(trackingUserId, latestLocationCoordinates);
+    }
+  }, 30000);
+}
+
+const relationshipLabels = {
+  mother: 'Mother',
+  father: 'Father',
+  guardian: 'Guardian',
+  son: 'Son',
+  daughter: 'Daughter',
+  child: 'Child',
+  sibling: 'Sibling',
+  grandparent: 'Grandparent',
+  spouse: 'Spouse / partner',
+  friend: 'Friend',
+  other: 'Other'
+};
+
+function relationshipLabel(value) {
+  return relationshipLabels[value] || 'Family member';
+}
+
+function birthdayAndAge(value) {
+  if (!value) return 'Not added (private)';
+  const [year, month, day] = value.split('-').map(Number);
+  const birthday = new Date(year, month - 1, day, 12);
+  const today = new Date();
+  let age = today.getFullYear() - year;
+  if (today.getMonth() + 1 < month || (today.getMonth() + 1 === month && today.getDate() < day)) age -= 1;
+  return `${birthday.toLocaleDateString()} · age ${age} (private)`;
+}
+
+function renderProfile() {
+  const displayName = profile?.display_name || '';
+  document.getElementById('profile-name').textContent = profile?.display_name || 'Sign in to set up your profile.';
+  document.getElementById('profile-role').textContent = profile ? relationshipLabel(profile.relationship) : '—';
+  document.getElementById('profile-email').textContent = user?.email || '—';
+  document.getElementById('profile-phone').textContent = profile?.phone || 'Not added (private)';
+  document.getElementById('profile-birthday-age').textContent = birthdayAndAge(profile?.birth_date);
+  document.getElementById('family-code').textContent = profile?.family_code || 'Available after profile setup';
+  document.getElementById('copy-family-code').disabled = !profile?.family_code;
+  shareLocationToggle.checked = Boolean(profile?.share_location);
+  shareLocationToggle.disabled = !user || !profile;
+  document.querySelector('.welcome-copy .eyebrow').textContent = displayName
+    ? `WELCOME, ${displayName.toLocaleUpperCase()}`
+    : 'WELCOME TO FAMGUARD';
+  document.querySelector('.welcome-copy p').textContent = 'Connect with trusted people and choose what you share.';
+  document.querySelector('.family-mini .mini-avatar').textContent = displayName
+    ? displayName.split(/\s+/).slice(0, 2).map(part => part[0] || '').join('').toUpperCase()
+    : 'FG';
+  document.querySelector('.family-mini strong').textContent = displayName || 'FamGuard member';
+  document.querySelector('.family-mini small').textContent = profile ? relationshipLabel(profile.relationship) : 'Complete your profile';
+}
+
+function openProfileDialog({ required = false } = {}) {
+  if (!user || !supabase) {
+    window.toast('Sign in before setting up a profile.');
+    return;
+  }
+
+  const dialogUser = user;
+  const today = new Date();
+  const todayValue = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  window.modal({
+    title: required ? 'Set up your FamGuard profile' : 'Edit your profile',
+    description: 'Your phone and birthday stay private. Family members only see your name and role.',
+    content: '<label class="eyebrow">Full name<input class="input" id="profile-name-input" autocomplete="name" maxlength="80" required></label><label class="eyebrow">Phone number (optional)<input class="input" id="profile-phone-input" type="tel" autocomplete="tel" maxlength="32"></label><label class="eyebrow">Family role<select class="select" id="profile-role-input" required><option value="">Choose a role</option><option value="mother">Mother</option><option value="father">Father</option><option value="guardian">Guardian</option><option value="son">Son</option><option value="daughter">Daughter</option><option value="child">Child</option><option value="sibling">Sibling</option><option value="grandparent">Grandparent</option><option value="spouse">Spouse / partner</option><option value="friend">Friend</option><option value="other">Other</option></select></label><label class="eyebrow">Birthday (optional; age is calculated and private)<input class="input" id="profile-birthday-input" type="date"></label>',
+    confirm: 'Save profile',
+    onConfirm: async (box, close) => {
+      if (user?.id !== dialogUser.id) {
+        window.toast('Your account changed. Reopen profile setup for the current account.');
+        return;
+      }
+      const displayName = box.querySelector('#profile-name-input').value.trim();
+      const phone = box.querySelector('#profile-phone-input').value.trim();
+      const relationship = box.querySelector('#profile-role-input').value;
+      const birthDate = box.querySelector('#profile-birthday-input').value || null;
+      if (!displayName || !relationship) {
+        window.toast('Enter your name and choose a family role.');
+        return;
+      }
+      if (phone && phone.length < 7) {
+        window.toast('Enter a complete phone number or leave it blank.');
+        return;
+      }
+      if (birthDate && birthDate > todayValue) {
+        window.toast('Birthday cannot be in the future.');
+        return;
+      }
+
+      const activeUser = dialogUser;
+      const { data, error } = await supabase.from('user_profiles').upsert({
+        user_id: activeUser.id,
+        display_name: displayName,
+        phone: phone || null,
+        relationship,
+        birth_date: birthDate,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'user_id' })
+        .select('user_id,display_name,phone,relationship,birth_date,family_code,share_location')
+        .single();
+      if (error) {
+        window.toast(`Profile could not be saved: ${error.message}. Check that supabase/schema.sql has been applied.`);
+        return;
+      }
+      if (user?.id !== activeUser.id) return;
+
+      profile = data;
+      profilePromptUserId = null;
+      renderProfile();
+      close();
+      await Promise.all([loadFamilyData(), loadFamilyLocations()]);
+      subscribeToFamilyUpdates();
+      startFamilyRefresh(activeUser.id);
+      window.toast('Your private profile was saved.');
+    }
+  });
+
+  const box = document.querySelector('#overlay-root .modal');
+  box.querySelector('#profile-name-input').value = profile?.display_name
+    || user.user_metadata?.full_name
+    || user.user_metadata?.name
+    || '';
+  box.querySelector('#profile-phone-input').value = profile?.phone || '';
+  box.querySelector('#profile-role-input').value = profile?.relationship || '';
+  box.querySelector('#profile-birthday-input').value = profile?.birth_date || '';
+  box.querySelector('#profile-birthday-input').max = todayValue;
+}
+
+async function loadProfile({ promptOnMissing = true } = {}) {
+  const activeUser = user;
+  const { data, error } = await supabase.from('user_profiles')
+    .select('user_id,display_name,phone,relationship,birth_date,family_code,share_location')
+    .maybeSingle();
+  if (user?.id !== activeUser?.id) return false;
+  if (error) {
+    profile = null;
+    renderProfile();
+    setStatus(`Signed in, but profile setup needs attention: ${error.message}`);
+    window.toast('Run the updated supabase/schema.sql before setting up a profile.');
+    return false;
+  }
+
+  profile = data;
+  renderProfile();
+  if (profile) {
+    profilePromptUserId = null;
+  } else if (promptOnMissing && profilePromptUserId !== activeUser.id) {
+    profilePromptUserId = activeUser.id;
+    openProfileDialog({ required: true });
+  }
+  return true;
+}
+
+function renderFamilyMembers() {
+  const list = document.getElementById('family-members');
+  const homePreview = document.getElementById('home-family-preview');
+  list.replaceChildren();
+  homePreview.replaceChildren();
+  const status = document.getElementById('family-members-status');
+  if (!user || !profile) {
+    status.textContent = 'Sign in and complete your profile to connect.';
+    const empty = document.createElement('p');
+    empty.className = 'eyebrow';
+    empty.textContent = 'Sign in and connect with family using their FamGuard ID.';
+    homePreview.append(empty);
+    return;
+  }
+  status.textContent = familyMembers.length
+    ? `${familyMembers.length} accepted family connection${familyMembers.length === 1 ? '' : 's'}.`
+    : 'No accepted family connections yet.';
+  if (!familyMembers.length) {
+    const empty = document.createElement('p');
+    empty.className = 'eyebrow';
+    empty.textContent = 'Enter a family member’s ID above. They must accept your request before you are connected.';
+    list.append(empty);
+    const homeEmpty = document.createElement('p');
+    homeEmpty.className = 'eyebrow';
+    homeEmpty.textContent = 'No family connections yet. Add a member by ID in Fam-Dash.';
+    homePreview.append(homeEmpty);
+    return;
+  }
+
+  familyMembers.forEach(member => {
+    const row = document.createElement('div');
+    row.className = 'family-data-item';
+    const copy = document.createElement('div');
+    copy.className = 'family-data-copy';
+    const name = document.createElement('strong');
+    name.textContent = member.display_name;
+    const detail = document.createElement('small');
+    detail.textContent = `${relationshipLabel(member.relationship)} · Location sharing ${member.sharing_location ? 'enabled' : 'off'}`;
+    copy.append(name, detail);
+    row.append(copy);
+    list.append(row);
+
+    const preview = document.createElement('button');
+    preview.className = 'contact';
+    preview.type = 'button';
+    const avatar = document.createElement('span');
+    avatar.className = 'avatar';
+    avatar.textContent = member.display_name.split(/\s+/).slice(0, 2).map(part => part[0] || '').join('').toUpperCase();
+    const previewCopy = document.createElement('span');
+    const previewName = document.createElement('span');
+    previewName.className = 'person-name';
+    previewName.textContent = member.display_name;
+    const previewRole = document.createElement('span');
+    previewRole.className = 'person-status';
+    previewRole.textContent = relationshipLabel(member.relationship);
+    previewCopy.append(previewName, previewRole);
+    preview.append(avatar, previewCopy);
+    preview.addEventListener('click', () => document.querySelector('.main-nav [data-view="famdash"]')?.click());
+    homePreview.append(preview);
+  });
+}
+
+async function respondToFamilyRequest(requestId, accept) {
+  const { error } = await supabase.rpc('respond_to_family_request', {
+    p_request_id: requestId,
+    p_accept: accept
+  });
+  if (error) {
+    window.toast(`Family request could not be updated: ${error.message}`);
+    return;
+  }
+  await Promise.all([loadFamilyData(), loadFamilyLocations()]);
+  window.toast(accept ? 'Family connection accepted.' : 'Family request declined.');
+}
+
+function renderFamilyRequests() {
+  const list = document.getElementById('family-requests');
+  list.replaceChildren();
+  const status = document.getElementById('family-requests-status');
+  if (!user || !profile) {
+    status.textContent = 'Sign in and complete your profile to manage requests.';
+    return;
+  }
+  status.textContent = familyRequests.length
+    ? `${familyRequests.length} pending request${familyRequests.length === 1 ? '' : 's'}.`
+    : 'Incoming requests need your approval.';
+  if (!familyRequests.length) {
+    const empty = document.createElement('p');
+    empty.className = 'eyebrow';
+    empty.textContent = 'No pending requests.';
+    list.append(empty);
+    return;
+  }
+
+  familyRequests.forEach(request => {
+    const row = document.createElement('div');
+    row.className = 'family-data-item';
+    const copy = document.createElement('div');
+    copy.className = 'family-data-copy';
+    const name = document.createElement('strong');
+    name.textContent = request.counterpart_name;
+    const detail = document.createElement('small');
+    detail.textContent = `${relationshipLabel(request.counterpart_role)} · ${request.direction === 'received' ? 'Wants to connect' : 'Waiting for their approval'}`;
+    copy.append(name, detail);
+    row.append(copy);
+    if (request.direction === 'received') {
+      const actions = document.createElement('div');
+      actions.className = 'family-request-actions';
+      const accept = document.createElement('button');
+      accept.className = 'text-link';
+      accept.type = 'button';
+      accept.textContent = 'Accept';
+      accept.addEventListener('click', () => void respondToFamilyRequest(request.request_id, true));
+      const decline = document.createElement('button');
+      decline.className = 'text-link';
+      decline.type = 'button';
+      decline.textContent = 'Decline';
+      decline.addEventListener('click', () => void respondToFamilyRequest(request.request_id, false));
+      actions.append(accept, decline);
+      row.append(actions);
+    }
+    list.append(row);
+  });
+}
+
+async function loadFamilyData() {
+  if (!user || !profile) {
+    familyMembers = [];
+    familyRequests = [];
+    renderFamilyMembers();
+    renderFamilyRequests();
+    return false;
+  }
+
+  const activeUser = user;
+  const [membersResult, requestsResult] = await Promise.all([
+    supabase.rpc('get_family_members'),
+    supabase.rpc('get_family_requests')
+  ]);
+  if (user?.id !== activeUser.id) return false;
+  const error = membersResult.error || requestsResult.error;
+  if (error) {
+    setStatus(`Family setup needs attention: ${error.message}`);
+    window.toast('Family connections are unavailable. Apply the updated supabase/schema.sql.');
+    return false;
+  }
+  familyMembers = membersResult.data || [];
+  familyRequests = requestsResult.data || [];
+  renderFamilyMembers();
+  renderFamilyRequests();
+  return true;
+}
+
+function hideLocationMap(message = 'Choose a current location to display its map pin.') {
+  const map = document.getElementById('live-map');
+  map.hidden = true;
+  map.removeAttribute('src');
+  document.getElementById('map-placeholder').hidden = false;
+  document.getElementById('map-placeholder').textContent = message;
+  mappedLocationVersion = '';
+}
+
+function showLocationOnMap(location, name, { force = false } = {}) {
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+
+  const map = document.getElementById('live-map');
+  const placeholder = document.getElementById('map-placeholder');
+  const version = `${location.user_id}:${latitude.toFixed(5)}:${longitude.toFixed(5)}`;
+  const now = Date.now();
+  const shouldReload = force || map.hidden || version !== mappedLocationVersion
+    && (location.user_id !== selectedLocationUserId || now - map.dataset.loadedAt > 60000);
+  selectedLocationUserId = location.user_id;
+  if (shouldReload) {
+      const latitudeDelta = 0.008;
+      const longitudeDelta = 0.008;
+    const bounds = [
+        Math.max(-180, longitude - longitudeDelta),
+        Math.max(-90, latitude - latitudeDelta),
+        Math.min(180, longitude + longitudeDelta),
+        Math.min(90, latitude + latitudeDelta)
+    ].map(value => value.toFixed(6)).join(',');
+    map.src = `https://www.openstreetmap.org/export/embed.html?bbox=${bounds}&layer=mapnik&marker=${latitude.toFixed(6)}%2C${longitude.toFixed(6)}`;
+    map.dataset.loadedAt = String(now);
+    mappedLocationVersion = version;
+  }
+  map.title = `${name}’s location on OpenStreetMap`;
+  map.hidden = false;
+  placeholder.hidden = true;
+}
+
+function renderFamilyLocations() {
+  const list = document.getElementById('live-family-locations');
+  list.replaceChildren();
+  const status = document.getElementById('live-family-status');
+  if (!user || !profile) {
+    status.textContent = 'Sign in and complete your profile to see locations.';
+    hideLocationMap('Sign in and complete your profile to see a map pin.');
+    return;
+  }
+  status.textContent = familyMembers.length
+    ? 'Only current locations shared by accepted family members are available.'
+    : 'No accepted family connections yet. Your own location appears here when tracking is on.';
+
+  const entries = [{
+    user_id: user.id,
+    display_name: `${profile.display_name} (you)`,
+    relationship: profile.relationship,
+    sharing_location: profile.share_location
+  }, ...familyMembers.map(member => ({ ...member, user_id: member.member_id }))];
+  entries.forEach(member => {
+    const location = sharedLocations.find(row => row.user_id === member.user_id);
+    const row = document.createElement('div');
+    row.className = 'family-data-item';
+    const copy = document.createElement('div');
+    copy.className = 'family-data-copy';
+    const name = document.createElement('strong');
+    name.textContent = member.display_name;
+    const detail = document.createElement('small');
+    detail.textContent = location
+      ? `Updated ${new Date(location.updated_at).toLocaleTimeString()}`
+      : member.user_id === user.id && locationWatchId !== null
+        ? 'Waiting for a location fix'
+        : member.sharing_location
+          ? 'Sharing enabled; waiting for a fresh location'
+          : 'Location sharing is off';
+    copy.append(name, detail);
+    row.append(copy);
+    if (location) {
+      const show = document.createElement('button');
+      show.className = 'text-link';
+      show.type = 'button';
+      show.textContent = 'Show on map';
+      show.addEventListener('click', () => showLocationOnMap(location, member.display_name, { force: true }));
+      row.append(show);
+    }
+    list.append(row);
+  });
+
+  if (!sharedLocations.some(row => row.user_id === selectedLocationUserId)) {
+    selectedLocationUserId = null;
+    hideLocationMap();
+  } else {
+    const current = sharedLocations.find(row => row.user_id === selectedLocationUserId);
+    const member = entries.find(entry => entry.user_id === selectedLocationUserId);
+    if (current && member) showLocationOnMap(current, member.display_name);
+  }
+}
+
+async function loadFamilyLocations({ silent = false } = {}) {
+  if (!user || !profile) {
+    sharedLocations = [];
+    renderFamilyLocations();
+    return false;
+  }
+
+  const activeUser = user;
+  const { data, error } = await supabase.from('locations')
+    .select('user_id,latitude,longitude,updated_at')
+    .order('updated_at', { ascending: false });
+  if (user?.id !== activeUser.id) return false;
+  if (error) {
+    if (!silent) {
+      setStatus(`Locations could not be loaded: ${error.message}`);
+      window.toast('Location sharing is unavailable. Apply the updated supabase/schema.sql.');
+    }
+    return false;
+  }
+
+  const freshnessLimit = Date.now() - 120000;
+  sharedLocations = (data || []).filter(row => Date.parse(row.updated_at) >= freshnessLimit);
+  renderFamilyLocations();
+  return true;
+}
+
+async function updateLocationSharing() {
+  if (!user || !profile) {
+    shareLocationToggle.checked = false;
+    window.toast('Complete your profile before changing location sharing.');
+    return;
+  }
+  const activeUser = user;
+  const wasSharing = profile.share_location;
+  shareLocationToggle.disabled = true;
+  const { error } = await supabase.from('user_profiles')
+    .update({ share_location: shareLocationToggle.checked, updated_at: new Date().toISOString() })
+    .eq('user_id', activeUser.id);
+  if (error) {
+    shareLocationToggle.checked = wasSharing;
+    shareLocationToggle.disabled = false;
+    window.toast(`Location sharing could not be changed: ${error.message}`);
+    return;
+  }
+  profile = { ...profile, share_location: shareLocationToggle.checked };
+  shareLocationToggle.disabled = false;
+  updateLocationUi(locationWatchId !== null, locationUpdateStatus.textContent);
+  await Promise.all([loadFamilyData(), loadFamilyLocations()]);
+  window.toast(profile.share_location
+    ? 'Your current location is visible to accepted family only while tracking is active.'
+    : 'Family location sharing is off.');
+}
+
+async function submitFamilyCode(event) {
+  event.preventDefault();
+  if (!user || !profile) {
+    window.toast('Sign in and complete your profile before connecting with family.');
+    return;
+  }
+  const input = document.getElementById('family-code-entry');
+  const code = input.value.trim().replace(/\s/g, '').toUpperCase();
+  if (code.length !== 16) {
+    window.toast('Enter the complete 16-character FamGuard ID.');
+    return;
+  }
+
+  const { data, error } = await supabase.rpc('lookup_family_code', { p_family_code: code });
+  if (error) {
+    window.toast(`FamGuard ID lookup failed: ${error.message}`);
+    return;
+  }
+  if (!data?.length) {
+    window.toast('No FamGuard ID matched. Check the code with its owner.');
+    return;
+  }
+
+  const member = data[0];
+  const requesterId = user.id;
+  window.modal({
+    title: 'Send a family request?',
+    description: 'They must accept before you are connected. Contact details and birthdays stay private.',
+    content: '<p class="eyebrow" id="family-request-preview"></p>',
+    confirm: 'Send request',
+    onConfirm: async (_, close) => {
+      if (user?.id !== requesterId) {
+        window.toast('Your account changed. Start the family request again.');
+        return;
+      }
+      const { error: requestError } = await supabase.rpc('request_family_connection', { p_family_code: code });
+      if (requestError) {
+        window.toast(`Family request could not be sent: ${requestError.message}`);
+        return;
+      }
+      close();
+      input.value = '';
+      await loadFamilyData();
+      window.toast('Request sent. You will connect after they accept.');
+    }
+  });
+  document.getElementById('family-request-preview').textContent =
+    `Send a request to ${member.display_name} (${relationshipLabel(member.relationship)})?`;
+}
+
+async function copyFamilyCode() {
+  if (!profile?.family_code) return;
+  try {
+    await navigator.clipboard.writeText(profile.family_code);
+    window.toast('FamGuard ID copied.');
+  } catch {
+    window.toast('Could not copy the ID. Select and copy it manually.');
+  }
+}
+
+function subscribeToFamilyUpdates() {
+  if (familyChannel) supabase.removeChannel(familyChannel);
+  if (!user) return;
+  familyChannel = supabase.channel(`famguard-family-${user.id}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'family_requests' }, () => {
+      void loadFamilyData();
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'family_connections' }, () => {
+      void Promise.all([loadFamilyData(), loadFamilyLocations({ silent: true })]);
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'locations' }, () => {
+      void loadFamilyLocations({ silent: true });
+    })
+    .subscribe();
+}
+
+function startFamilyRefresh(activeUserId) {
+  if (familyRefreshTimer) clearInterval(familyRefreshTimer);
+  familyRefreshTimer = setInterval(() => {
+    if (user?.id !== activeUserId || document.visibilityState !== 'visible') return;
+    void loadFamilyData();
+    void loadFamilyLocations({ silent: true });
+  }, 15000);
 }
 
 function renderAccount() {
@@ -388,8 +967,20 @@ function subscribeToAlerts() {
 }
 
 async function loadSession(session) {
+  const loadSequence = ++sessionLoadSequence;
   const nextUser = session?.user || null;
   if (user?.id !== nextUser?.id) {
+    if (familyRefreshTimer) clearInterval(familyRefreshTimer);
+    familyRefreshTimer = null;
+    if (familyChannel) supabase.removeChannel(familyChannel);
+    familyChannel = null;
+    profile = null;
+    familyMembers = [];
+    familyRequests = [];
+    sharedLocations = [];
+    profilePromptUserId = null;
+    selectedLocationUserId = null;
+    hideLocationMap('Sign in and complete your profile to see a map pin.');
     if (locationWatchId !== null) await stopLocationTracking({ removeSaved: false });
     taskIds.clear();
     calendarEventIds.clear();
@@ -398,8 +989,10 @@ async function loadSession(session) {
   user = nextUser;
   window.famguardUser = user;
   renderAccount();
+  renderProfile();
   if (!user) {
     if (alertChannel) supabase.removeChannel(alertChannel);
+    if (familyChannel) supabase.removeChannel(familyChannel);
     window.famguardHydrating = true;
     let savedTasks = [];
     try { savedTasks = JSON.parse(localStorage.getItem('famguard-tasks')) || []; } catch {}
@@ -407,12 +1000,32 @@ async function loadSession(session) {
     taskIds.clear();
     window.famguardRenderTasks();
     window.famguardHydrating = false;
+    renderFamilyMembers();
+    renderFamilyRequests();
+    renderFamilyLocations();
     return;
   }
 
+  await loadProfile();
+  if (loadSequence !== sessionLoadSequence) return;
   await loadTasks();
+  if (loadSequence !== sessionLoadSequence) return;
   await loadCalendarEvents();
+  if (loadSequence !== sessionLoadSequence) return;
   await loadPosts();
+  if (loadSequence !== sessionLoadSequence) return;
+  if (profile) {
+    await loadFamilyData();
+    if (loadSequence !== sessionLoadSequence) return;
+    await loadFamilyLocations();
+    if (loadSequence !== sessionLoadSequence) return;
+    subscribeToFamilyUpdates();
+    startFamilyRefresh(user.id);
+  } else {
+    renderFamilyMembers();
+    renderFamilyRequests();
+    renderFamilyLocations();
+  }
   subscribeToAlerts();
 }
 
@@ -501,6 +1114,10 @@ document.getElementById('install-app').addEventListener('click', async () => {
 });
 
 document.getElementById('account-button').addEventListener('click', openAccountDialog);
+document.getElementById('edit-profile').addEventListener('click', () => openProfileDialog());
+document.getElementById('copy-family-code').addEventListener('click', copyFamilyCode);
+document.getElementById('family-code-form').addEventListener('submit', event => void submitFamilyCode(event));
+shareLocationToggle.addEventListener('change', updateLocationSharing);
 locationToggle.addEventListener('change', () => {
   if (locationToggle.checked) startLocationTracking();
   else void stopLocationTracking();
@@ -531,4 +1148,8 @@ if (supabase) {
   };
 } else {
   renderAccount();
+  renderProfile();
+  renderFamilyMembers();
+  renderFamilyRequests();
+  renderFamilyLocations();
 }

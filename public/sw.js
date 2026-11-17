@@ -1,4 +1,4 @@
-const CACHE_NAME = 'famguard-shell-v7';
+const CACHE_NAME = 'famguard-shell-v8';
 const SHELL_FILES = ['/', '/manifest.webmanifest', '/famguard-icon.png'];
 
 self.addEventListener('install', event => {
