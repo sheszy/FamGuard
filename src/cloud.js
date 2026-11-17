@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { playNotificationSound, stopNotificationSound } from './notificationSound.js';
 
 const env = import.meta.env;
 const supabaseUrl = env.VITE_SUPABASE_URL?.trim();
@@ -14,6 +15,10 @@ const locationUpdateStatus = document.getElementById('location-update-status');
 const shareLocationToggle = document.getElementById('share-location-toggle');
 const homeLocationBadge = document.getElementById('home-location-badge');
 const homeLocationStatus = document.getElementById('home-location-status');
+const sosSoundSelect = document.getElementById('sos-sound-select');
+const customSoundFile = document.getElementById('custom-sound-file');
+const notificationPermissionStatus = document.getElementById('notification-permission-status');
+const enableNotificationsButton = document.getElementById('enable-notifications');
 const taskIds = new Set();
 const calendarEventIds = new Set();
 let user = null;
@@ -35,6 +40,8 @@ let sessionLoadSequence = 0;
 let profilePromptUserId = null;
 let selectedLocationUserId = null;
 let mappedLocationVersion = '';
+let incomingSosAlerts = new Map();
+let activeSosBannerId = null;
 
 function setStatus(message) {
   cloudStatus.textContent = message;
@@ -57,6 +64,78 @@ function setLocationTrackingPreference(enabled, userId = user?.id) {
   } catch {
     window.toast('The location tracking preference could not be saved on this device.');
   }
+}
+
+function soundPreferenceKey(userId = user?.id) {
+  return `famguard-sos-sound:${userId || 'demo'}`;
+}
+
+function customSoundKey(userId = user?.id) {
+  return `famguard-custom-sos-sound:${userId || 'demo'}`;
+}
+
+function getCustomSoundDataUrl() {
+  try {
+    return localStorage.getItem(customSoundKey()) || '';
+  } catch {
+    return '';
+  }
+}
+
+function getSelectedSosSound() {
+  const allowed = new Set(['urgent-siren', 'pulse-chime', 'radar-beep', 'gentle-bell', 'custom']);
+  try {
+    const saved = localStorage.getItem(soundPreferenceKey());
+    if (allowed.has(saved)) return saved;
+  } catch {}
+  return allowed.has(profile?.notification_sound) ? profile.notification_sound : 'urgent-siren';
+}
+
+function initializeSosSoundPreference() {
+  sosSoundSelect.value = getSelectedSosSound();
+}
+
+async function saveSosSoundPreference(sound) {
+  const activeUserId = user?.id;
+  try {
+    localStorage.setItem(soundPreferenceKey(activeUserId), sound);
+  } catch {
+    window.toast('The sound preference could not be saved on this device.');
+  }
+
+  if (!activeUserId || !profile || !supabase) return;
+  try {
+    const { error } = await supabase.from('user_profiles')
+      .update({ notification_sound: sound, updated_at: new Date().toISOString() })
+      .eq('user_id', activeUserId);
+    if (user?.id !== activeUserId) return;
+    if (error) {
+      window.toast(`The sound preference was saved on this device but not to your profile: ${error.message}`);
+      return;
+    }
+    profile = { ...profile, notification_sound: sound };
+  } catch (error) {
+    if (user?.id === activeUserId) {
+      window.toast(`The sound preference was saved on this device but not to your profile: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return;
+  }
+}
+
+function updateNotificationPermissionStatus() {
+  if (!('Notification' in window)) {
+    notificationPermissionStatus.textContent = 'Browser notifications are not supported here.';
+    notificationPermissionStatus.className = 'notification-status denied';
+    enableNotificationsButton.hidden = true;
+    return;
+  }
+
+  const permission = Notification.permission;
+  notificationPermissionStatus.textContent = `Browser notifications: ${permission}.`;
+  notificationPermissionStatus.className = `notification-status ${permission === 'granted' ? 'granted' : permission === 'denied' ? 'denied' : 'pending'}`;
+  enableNotificationsButton.hidden = permission === 'granted';
+  enableNotificationsButton.textContent = permission === 'denied' ? 'How to enable notifications' : 'Enable Notifications';
+  enableNotificationsButton.disabled = false;
 }
 
 function updateLocationUi(enabled, message) {
@@ -238,6 +317,7 @@ function renderProfile() {
     : 'FG';
   document.querySelector('.family-mini strong').textContent = displayName || 'FamGuard member';
   document.querySelector('.family-mini small').textContent = profile ? relationshipLabel(profile.relationship) : 'Complete your profile';
+  initializeSosSoundPreference();
 }
 
 function openProfileDialog({ required = false } = {}) {
@@ -285,7 +365,7 @@ function openProfileDialog({ required = false } = {}) {
         birth_date: birthDate,
         updated_at: new Date().toISOString()
       }, { onConflict: 'user_id' })
-        .select('user_id,display_name,phone,relationship,birth_date,family_code,share_location')
+        .select('user_id,display_name,phone,relationship,birth_date,family_code,share_location,notification_sound')
         .single();
       if (error) {
         window.toast(`Profile could not be saved: ${error.message}. Check that supabase/schema.sql has been applied.`);
@@ -319,7 +399,7 @@ function openProfileDialog({ required = false } = {}) {
 async function loadProfile({ promptOnMissing = true } = {}) {
   const activeUser = user;
   const { data, error } = await supabase.from('user_profiles')
-    .select('user_id,display_name,phone,relationship,birth_date,family_code,share_location')
+    .select('user_id,display_name,phone,relationship,birth_date,family_code,share_location,notification_sound')
     .maybeSingle();
   if (user?.id !== activeUser?.id) return false;
   if (error) {
@@ -884,7 +964,10 @@ function syncCalendarEvents() {
     event_type: event.type,
     is_recurring: event.recurring,
     person_name: event.personName || null,
-    event_time: event.time || null
+    event_time: event.time || null,
+    event_end_time: event.endTime || null,
+    event_description: event.description || null,
+    event_location: event.location || null
   }));
   const currentIds = new Set(rows.map(row => row.id));
 
@@ -913,7 +996,7 @@ async function loadCalendarEvents() {
   const activeUser = user;
   const { data, error } = await supabase
     .from('family_events')
-    .select('id,title,event_date,event_type,is_recurring,person_name,event_time')
+    .select('id,title,event_date,event_type,is_recurring,person_name,event_time,event_end_time,event_description,event_location')
     .order('event_date');
   if (user?.id !== activeUser?.id) return;
   if (error) {
@@ -933,7 +1016,10 @@ async function loadCalendarEvents() {
       type: row.event_type,
       recurring: row.is_recurring,
       personName: row.person_name || '',
-      time: row.event_time?.slice(0, 5) || ''
+      time: row.event_time?.slice(0, 5) || '',
+      endTime: row.event_end_time?.slice(0, 5) || '',
+      description: row.event_description || '',
+      location: row.event_location || ''
     });
   });
   window.famguardCalendarEvents.forEach(event => merged.set(event.id, event));
@@ -973,22 +1059,196 @@ async function loadPosts() {
   renderPosts(data);
 }
 
+function alertSenderName(alert) {
+  return familyMembers.find(member => member.member_id === alert.user_id)?.display_name || 'A family member';
+}
+
+function renderSosBanner() {
+  const banner = document.getElementById('sos-alert-banner');
+  if (!incomingSosAlerts.size) {
+    banner.hidden = true;
+    banner.replaceChildren();
+    activeSosBannerId = null;
+    stopNotificationSound();
+    return;
+  }
+  if (!incomingSosAlerts.has(activeSosBannerId)) {
+    const alertIds = [...incomingSosAlerts.keys()];
+    activeSosBannerId = alertIds[alertIds.length - 1];
+  }
+
+  const alert = incomingSosAlerts.get(activeSosBannerId);
+  const sender = alertSenderName(alert);
+  const detail = `${Number(alert.latitude).toFixed(5)}, ${Number(alert.longitude).toFixed(5)}`;
+  banner.replaceChildren();
+  const heading = document.createElement('strong');
+  heading.className = 'sos-banner-heading';
+  heading.textContent = `FAMILY SOS · ${sender}`;
+  const reason = document.createElement('p');
+  reason.className = 'sos-banner-reason';
+  reason.textContent = alert.situation_reason;
+  const location = document.createElement('p');
+  location.className = 'sos-banner-location';
+  location.textContent = `GPS: ${detail}`;
+  const actions = document.createElement('div');
+  actions.className = 'sos-banner-actions';
+  const viewButton = document.createElement('button');
+  viewButton.type = 'button';
+  viewButton.className = 'btn-secondary';
+  viewButton.textContent = 'View on Map';
+  viewButton.addEventListener('click', () => viewSosOnMap(alert));
+  const acknowledgeButton = document.createElement('button');
+  acknowledgeButton.type = 'button';
+  acknowledgeButton.className = 'btn-danger';
+  acknowledgeButton.textContent = 'Acknowledge / Dismiss';
+  acknowledgeButton.addEventListener('click', () => void acknowledgeSosAlert(alert.id));
+  actions.append(viewButton, acknowledgeButton);
+  banner.append(heading, reason, location, actions);
+  banner.hidden = false;
+}
+
+async function showNativeSosNotification(alert) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const registration = await navigator.serviceWorker?.ready;
+    if (!registration) return;
+    const sender = alertSenderName(alert);
+    await registration.showNotification(`Family SOS · ${sender}`, {
+      body: `${alert.situation_reason} · GPS ${Number(alert.latitude).toFixed(5)}, ${Number(alert.longitude).toFixed(5)}`,
+      icon: '/famguard-icon.png',
+      badge: '/famguard-icon.png',
+      tag: `famguard-sos-${alert.id}`,
+      renotify: true,
+      requireInteraction: true,
+      actions: [
+        { action: 'view-map', title: 'View on Map' },
+        { action: 'acknowledge', title: 'Acknowledge' }
+      ],
+      data: { alertId: alert.id }
+    });
+  } catch (error) {
+    window.toast(`Could not show the SOS notification: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function showIncomingSosAlert(alert, { notify = true, vibrate = true } = {}) {
+  if (!user || alert.user_id === user.id || alert.kind !== 'sos' || alert.status !== 'active') return;
+  if (alert.target_user_id && alert.target_user_id !== user.id) return;
+  if (!Number.isFinite(Number(alert.latitude)) || !Number.isFinite(Number(alert.longitude))) return;
+  if (incomingSosAlerts.has(alert.id)) return;
+
+  incomingSosAlerts.set(alert.id, alert);
+  activeSosBannerId = alert.id;
+  renderSosBanner();
+  if (vibrate && typeof navigator.vibrate === 'function') {
+    navigator.vibrate([500, 200, 500, 200, 800]);
+  }
+  void playNotificationSound(getSelectedSosSound(), getCustomSoundDataUrl(), { loop: true })
+    .catch(error => window.toast(`SOS alarm could not play: ${error instanceof Error ? error.message : String(error)}`));
+  if (notify) void showNativeSosNotification(alert);
+}
+
+function viewSosOnMap(alert) {
+  document.querySelector('.main-nav [data-view="location"]')?.click();
+  const senderName = alertSenderName(alert);
+  showLocationOnMap({
+    user_id: alert.user_id,
+    latitude: alert.latitude,
+    longitude: alert.longitude
+  }, senderName, { force: true });
+}
+
+async function acknowledgeSosAlert(alertId) {
+  if (!user || !supabase) {
+    window.toast('Sign in to acknowledge this SOS alert.');
+    return;
+  }
+  try {
+    const { error } = await supabase.rpc('acknowledge_family_alert', { p_alert_id: alertId });
+    if (error) {
+      window.toast(`SOS alert could not be acknowledged: ${error.message}`);
+      return;
+    }
+  } catch (error) {
+    window.toast(`SOS alert could not be acknowledged: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  incomingSosAlerts.delete(alertId);
+  renderSosBanner();
+  window.toast('SOS acknowledged.');
+}
+
+async function handleSosNotificationAction(alertId, action) {
+  if (!alertId) return;
+  if (!user) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('sosAlert', alertId);
+    url.searchParams.set('sosAction', action);
+    history.replaceState(null, '', url);
+    return;
+  }
+  if (!supabase) return;
+  const { data, error } = await supabase.from('family_alerts')
+    .select('id,user_id,target_user_id,kind,situation_reason,latitude,longitude,status,created_at')
+    .eq('id', alertId)
+    .maybeSingle();
+  if (error) {
+    window.toast(`SOS alert could not be opened: ${error.message}`);
+    return;
+  }
+  if (!data) {
+    window.toast('This SOS alert is no longer available to your account.');
+    return;
+  }
+  if (action === 'acknowledge') {
+    await acknowledgeSosAlert(alertId);
+    return;
+  }
+  showIncomingSosAlert(data, { notify: false, vibrate: false });
+  viewSosOnMap(data);
+}
+
+function handleSosDeepLink() {
+  const params = new URLSearchParams(window.location.search);
+  const alertId = params.get('sosAlert');
+  if (!user || !alertId) return;
+  const action = params.get('sosAction') || 'view-map';
+  history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`);
+  void handleSosNotificationAction(alertId, action);
+}
+
+async function loadActiveSosAlerts() {
+  if (!user || !supabase) return;
+  const { data, error } = await supabase.from('family_alerts')
+    .select('id,user_id,target_user_id,kind,situation_reason,latitude,longitude,status,created_at')
+    .eq('kind', 'sos')
+    .eq('status', 'active')
+    .order('created_at', { ascending: true });
+  if (error) {
+    window.toast(`Active family alerts could not be loaded: ${error.message}`);
+    return;
+  }
+  data.forEach(alert => showIncomingSosAlert(alert, { notify: false, vibrate: false }));
+}
+
 function subscribeToAlerts() {
   if (alertChannel) supabase.removeChannel(alertChannel);
+  if (!user) return;
   alertChannel = supabase.channel(`famguard-alerts-${user.id}`)
     .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'family_alerts', filter: `user_id=eq.${user.id}`
+      event: 'INSERT', schema: 'public', table: 'family_alerts'
+    }, payload => showIncomingSosAlert(payload.new))
+    .on('postgres_changes', {
+      event: 'UPDATE', schema: 'public', table: 'family_alerts'
     }, payload => {
-      const alert = payload.new;
-      if ('Notification' in window && Notification.permission === 'granted') {
-        navigator.serviceWorker?.ready.then(registration => registration.showNotification(alert.title, {
-          body: alert.message,
-          icon: '/famguard-icon.png'
-        }));
-      } else {
-        window.toast(`${alert.title}: ${alert.message}`);
+      if (payload.new.status !== 'active') {
+        incomingSosAlerts.delete(payload.new.id);
+        renderSosBanner();
       }
-    }).subscribe();
+    })
+    .subscribe(status => {
+      if (status === 'SUBSCRIBED') void loadActiveSosAlerts();
+    });
 }
 
 async function loadSession(session) {
@@ -1005,6 +1265,10 @@ async function loadSession(session) {
     sharedLocations = [];
     profilePromptUserId = null;
     selectedLocationUserId = null;
+    incomingSosAlerts.clear();
+    activeSosBannerId = null;
+    stopNotificationSound();
+    renderSosBanner();
     hideLocationMap();
     if (locationWatchId !== null) await stopLocationTracking({ removeSaved: false });
     taskIds.clear();
@@ -1017,6 +1281,7 @@ async function loadSession(session) {
   renderProfile();
   if (!user) {
     if (alertChannel) supabase.removeChannel(alertChannel);
+    alertChannel = null;
     if (familyChannel) supabase.removeChannel(familyChannel);
     window.famguardHydrating = true;
     let savedTasks = [];
@@ -1052,6 +1317,7 @@ async function loadSession(session) {
     renderFamilyLocations();
   }
   subscribeToAlerts();
+  handleSosDeepLink();
 }
 
 function submitCommunityPost() {
@@ -1085,42 +1351,242 @@ function submitCommunityPost() {
   });
 }
 
-async function sendSos() {
+function getSosPosition() {
+  if (!window.isSecureContext || !navigator.geolocation) {
+    return Promise.reject(new Error('GPS requires browser location access on a secure HTTPS page.'));
+  }
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, error => reject(new Error(error.message)), {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 5000
+    });
+  });
+}
+
+function sendSos() {
+  if (!user || !profile || !supabase) {
+    window.modal({
+      title: 'Sign in to send an SOS',
+      description: 'Family SOS alerts require a signed-in account and a completed FamGuard profile.',
+      confirm: 'Sign in',
+      onConfirm: (_, close) => {
+        close();
+        openAccountDialog();
+      }
+    });
+    return;
+  }
+  if (!familyMembers.length) {
+    window.toast('Connect at least one accepted family member before sending an SOS.');
+    return;
+  }
+
+  const senderId = user.id;
+  let gpsFix = null;
+  let reviewed = false;
   window.modal({
     title: 'Family SOS',
-    description: user ? 'This saves an SOS record to your account. It does not notify family members yet.' : 'This is a demo alert. Sign in to save it to Supabase.',
+    description: 'Choose who should receive this alert, describe what is happening, and confirm before sending.',
     danger: true,
-    confirm: user ? 'Save SOS alert' : 'Close',
-    content: '<div class="sos-person"><span class="avatar self">MF</span><span><strong>Marika Flores needs help</strong><small>Current location · USTP CDO Campus</small></span></div><p class="eyebrow">A push-notification sender and family invitations are still needed for delivery to contacts.</p>',
-    onConfirm: async (_, close) => {
-      if (!user) {
-        close();
+    confirm: 'Review SOS',
+    content: '<p class="sos-sender">Sending as <strong id="sos-sender-name"></strong></p><label class="eyebrow" for="sos-recipient">Send to<select class="select" id="sos-recipient"><option value="">All Connected Family</option></select></label><div class="sos-reasons" role="group" aria-label="Quick situation reasons"><button class="sos-reason-chip" type="button" data-reason="Medical Emergency">Medical Emergency</button><button class="sos-reason-chip" type="button" data-reason="Feeling Unsafe">Feeling Unsafe</button><button class="sos-reason-chip" type="button" data-reason="Car / Travel Trouble">Car / Travel Trouble</button><button class="sos-reason-chip" type="button" data-reason="Need Pickup Now">Need Pickup Now</button></div><label class="eyebrow" for="sos-situation">Situation<input class="input" id="sos-situation" maxlength="300" placeholder="Describe what help you need" required></label><div class="sos-location-panel"><p id="sos-location-status" role="status">Getting your current GPS location…</p><button class="btn-secondary" id="refresh-sos-location" type="button">Refresh GPS location</button></div><p class="eyebrow" id="sos-review-summary" hidden></p>',
+    onConfirm: async (box, close) => {
+      if (user?.id !== senderId) {
+        window.toast('Your account changed. Start the SOS flow again.');
         return;
       }
-      const { error } = await supabase.from('family_alerts').insert({
-        user_id: user.id,
-        kind: 'sos',
-        title: 'Family SOS',
-        message: 'Marika Flores needs help. Current location: USTP CDO Campus.'
-      });
+      const reason = box.querySelector('#sos-situation').value.trim();
+      const targetId = box.querySelector('#sos-recipient').value || null;
+      if (!reason) {
+        window.toast('Describe the emergency before continuing.');
+        return;
+      }
+      if (reason.length > 300) {
+        window.toast('Keep the situation description under 300 characters.');
+        return;
+      }
+      if (targetId && !familyMembers.some(member => member.member_id === targetId)) {
+        window.toast('Choose an accepted family connection as the recipient.');
+        return;
+      }
+      if (!gpsFix) {
+        window.toast('Wait for a GPS location or refresh the location before continuing.');
+        return;
+      }
+      if (Date.now() - gpsFix.timestamp > 120000) {
+        gpsFix = null;
+        reviewed = false;
+        box.querySelector('#sos-review-summary').hidden = true;
+        box.querySelector('.confirm').textContent = 'Review SOS';
+        box.querySelectorAll('#sos-recipient,#sos-situation,.sos-reason-chip,#refresh-sos-location').forEach(element => { element.disabled = false; });
+        window.toast('Your GPS fix is no longer current. Refresh it before sending.');
+        void refreshLocation();
+        return;
+      }
+
+      const recipientName = targetId
+        ? familyMembers.find(member => member.member_id === targetId)?.display_name || 'selected family member'
+        : 'all connected family';
+      const summary = box.querySelector('#sos-review-summary');
+      const confirmButton = box.querySelector('.confirm');
+      if (!reviewed) {
+        summary.textContent = `Send to ${recipientName}: “${reason}” · GPS ${gpsFix.latitude.toFixed(5)}, ${gpsFix.longitude.toFixed(5)}.`;
+        summary.hidden = false;
+        box.querySelectorAll('#sos-recipient,#sos-situation,.sos-reason-chip,#refresh-sos-location').forEach(element => { element.disabled = true; });
+        reviewed = true;
+        confirmButton.textContent = 'Confirm & Send SOS';
+        return;
+      }
+
+      confirmButton.disabled = true;
+      let error;
+      try {
+        ({ error } = await supabase.from('family_alerts').insert({
+          user_id: senderId,
+          target_user_id: targetId,
+          kind: 'sos',
+          title: 'Family SOS',
+          message: reason,
+          situation_reason: reason,
+          latitude: gpsFix.latitude,
+          longitude: gpsFix.longitude,
+          status: 'active'
+        }));
+      } catch (requestError) {
+        error = requestError instanceof Error ? requestError : new Error(String(requestError));
+      }
+      if (user?.id !== senderId) {
+        close();
+        window.toast(error ? 'The SOS was not sent because the account changed.' : 'The SOS was sent from the previous account.');
+        return;
+      }
       if (error) {
-        window.toast(`SOS could not be saved: ${error.message}`);
+        confirmButton.disabled = false;
+        window.toast(`SOS could not be sent: ${error.message}. Check that the updated Supabase schema is applied.`);
         return;
       }
       close();
-      window.toast('SOS saved. Family delivery is not configured yet.');
+      window.toast(`SOS sent to ${recipientName}. Your family will receive it while connected.`);
     }
   });
+
+  const box = document.querySelector('#overlay-root .modal');
+  box.querySelector('#sos-sender-name').textContent = profile.display_name;
+  familyMembers.forEach(member => {
+    const option = document.createElement('option');
+    option.value = member.member_id;
+    option.textContent = member.display_name;
+    box.querySelector('#sos-recipient').append(option);
+  });
+  const reasonInput = box.querySelector('#sos-situation');
+  box.querySelectorAll('.sos-reason-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      reasonInput.value = chip.dataset.reason;
+      reasonInput.focus();
+    });
+  });
+  async function refreshLocation() {
+    const status = box.querySelector('#sos-location-status');
+    const button = box.querySelector('#refresh-sos-location');
+    button.disabled = true;
+    status.textContent = 'Getting a fresh GPS fix…';
+    try {
+      const position = await getSosPosition();
+      gpsFix = {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        timestamp: position.timestamp || Date.now()
+      };
+      status.textContent = `Current GPS location: ${gpsFix.latitude.toFixed(5)}, ${gpsFix.longitude.toFixed(5)}. This will be shared only with the selected recipient(s).`;
+    } catch (error) {
+      status.textContent = `Could not get GPS: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  }
+  box.querySelector('#refresh-sos-location').addEventListener('click', () => void refreshLocation());
+  void refreshLocation();
 }
 
 async function requestNotifications() {
   if (!('Notification' in window)) {
     window.toast('This browser does not support notifications.');
+    updateNotificationPermissionStatus();
     return;
   }
-  const permission = await Notification.requestPermission();
-  window.toast(permission === 'granted' ? 'Device notifications are enabled for live app updates.' : 'Notification permission was not granted.');
+  if (Notification.permission === 'denied') {
+    window.toast('Notifications are blocked for FamGuard. Allow them in this site’s browser settings.');
+    updateNotificationPermissionStatus();
+    return;
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    updateNotificationPermissionStatus();
+    window.toast(permission === 'granted' ? 'Browser notifications are enabled.' : 'Notification permission was not granted.');
+  } catch (error) {
+    window.toast(`Notification permission could not be requested: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
+
+async function previewSelectedSosSound() {
+  try {
+    await playNotificationSound(getSelectedSosSound(), getCustomSoundDataUrl());
+  } catch (error) {
+    window.toast(`Sound preview failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+sosSoundSelect.addEventListener('change', async () => {
+  const sound = sosSoundSelect.value;
+  if (sound === 'custom' && !getCustomSoundDataUrl()) {
+    sosSoundSelect.value = getSelectedSosSound();
+    window.toast('Upload an MP3 or WAV file before selecting a custom sound.');
+    return;
+  }
+  await saveSosSoundPreference(sound);
+  window.toast('SOS sound preference saved.');
+});
+
+document.getElementById('sound-preview').addEventListener('click', () => void previewSelectedSosSound());
+
+customSoundFile.addEventListener('change', () => {
+  const file = customSoundFile.files?.[0];
+  if (!file) return;
+  const extension = file.name.toLowerCase().split('.').pop();
+  if (!['mp3', 'wav'].includes(extension)) {
+    window.toast('Choose an MP3 or WAV audio file.');
+    customSoundFile.value = '';
+    return;
+  }
+  if (file.size > 1024 * 1024) {
+    window.toast('Choose an audio file smaller than 1 MB so it fits in local browser storage.');
+    customSoundFile.value = '';
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onerror = () => {
+    customSoundFile.value = '';
+    window.toast('The selected audio file could not be read.');
+  };
+  reader.onload = async () => {
+    if (typeof reader.result !== 'string') {
+      window.toast('The selected audio file could not be stored.');
+      return;
+    }
+    try {
+      localStorage.setItem(customSoundKey(), reader.result);
+    } catch (error) {
+      window.toast(`Custom audio could not be saved in browser storage: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    sosSoundSelect.value = 'custom';
+    await saveSosSoundPreference('custom');
+    window.toast(`${file.name} is saved as your local SOS sound.`);
+  };
+  reader.readAsDataURL(file);
+});
 
 let installPrompt;
 window.addEventListener('beforeinstallprompt', event => {
@@ -1138,6 +1604,7 @@ document.getElementById('install-app').addEventListener('click', async () => {
   installPrompt = null;
 });
 
+document.getElementById('sos-button').addEventListener('click', sendSos);
 document.getElementById('account-button').addEventListener('click', openAccountDialog);
 document.getElementById('edit-profile').addEventListener('click', () => openProfileDialog());
 document.getElementById('copy-family-code').addEventListener('click', copyFamilyCode);
@@ -1154,6 +1621,16 @@ document.getElementById('sign-out-button').addEventListener('click', async () =>
   if (error) window.toast(error.message);
 });
 document.getElementById('enable-notifications').addEventListener('click', requestNotifications);
+window.addEventListener('focus', updateNotificationPermissionStatus);
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    const message = event.data;
+    if (message?.type === 'famguard:sos-action') {
+      void handleSosNotificationAction(message.alertId, message.action || 'view-map');
+    }
+  });
+}
+updateNotificationPermissionStatus();
 window.addEventListener('famguard:tasks-changed', syncTasks);
 window.addEventListener('famguard:calendar-events-changed', syncCalendarEvents);
 
@@ -1164,7 +1641,6 @@ if (supabase) {
     if (error) setStatus(`Supabase connection failed: ${error.message}`);
     else loadSession(data.session);
   });
-  document.getElementById('sos-button').onclick = sendSos;
   document.getElementById('new-post').onclick = () => {
     if (!user) {
       window.toast('Sign in to share a community post.');

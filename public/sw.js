@@ -1,4 +1,4 @@
-const CACHE_NAME = 'famguard-shell-v9';
+const CACHE_NAME = 'famguard-shell-v10';
 const SHELL_FILES = ['/', '/manifest.webmanifest', '/famguard-icon.png'];
 
 self.addEventListener('install', event => {
@@ -51,8 +51,23 @@ self.addEventListener('push', event => {
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const destination = new URL(event.notification.data?.url || '/', self.location.origin).href;
-  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
+  const data = event.notification.data || {};
+  const action = event.action === 'acknowledge' ? 'acknowledge' : 'view-map';
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async clients => {
+    if (data.alertId) {
+      const existing = clients.find(client => new URL(client.url).origin === self.location.origin);
+      if (existing) {
+        await existing.focus();
+        existing.postMessage({ type: 'famguard:sos-action', alertId: data.alertId, action });
+        return;
+      }
+      const destination = new URL('/', self.location.origin);
+      destination.searchParams.set('sosAlert', data.alertId);
+      destination.searchParams.set('sosAction', action);
+      return self.clients.openWindow(destination.href);
+    }
+
+    const destination = new URL(data.url || '/', self.location.origin).href;
     const existing = clients.find(client => client.url === destination);
     return existing ? existing.focus() : self.clients.openWindow(destination);
   }));

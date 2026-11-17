@@ -17,9 +17,16 @@ create table if not exists public.family_events (
   event_type text not null check (event_type in ('family', 'birthday', 'anniversary')),
   is_recurring boolean not null default false,
   person_name text,
+  event_description text,
+  event_location text,
   event_time time,
+  event_end_time time,
   created_at timestamptz not null default now()
 );
+
+alter table public.family_events add column if not exists event_description text;
+alter table public.family_events add column if not exists event_location text;
+alter table public.family_events add column if not exists event_end_time time;
 
 create table if not exists public.community_posts (
   id uuid primary key default gen_random_uuid(),
@@ -33,11 +40,67 @@ create table if not exists public.community_posts (
 create table if not exists public.family_alerts (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade default auth.uid(),
+  target_user_id uuid references auth.users(id) on delete cascade,
   kind text not null check (kind in ('sos', 'safety')),
   title text not null,
   message text not null,
+  situation_reason text,
+  latitude double precision,
+  longitude double precision,
+  status text not null default 'active',
+  acknowledged_by uuid references auth.users(id) on delete set null,
+  acknowledged_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.family_alerts add column if not exists target_user_id uuid references auth.users(id) on delete cascade;
+alter table public.family_alerts drop constraint if exists family_alerts_target_user_id_fkey;
+alter table public.family_alerts add constraint family_alerts_target_user_id_fkey
+  foreign key (target_user_id) references auth.users(id) on delete cascade;
+alter table public.family_alerts add column if not exists situation_reason text;
+alter table public.family_alerts add column if not exists latitude double precision;
+alter table public.family_alerts add column if not exists longitude double precision;
+alter table public.family_alerts add column if not exists status text not null default 'active';
+alter table public.family_alerts add column if not exists acknowledged_by uuid references auth.users(id) on delete set null;
+alter table public.family_alerts add column if not exists acknowledged_at timestamptz;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'family_alerts_status_check'
+      and conrelid = 'public.family_alerts'::regclass
+  ) then
+    alter table public.family_alerts
+      add constraint family_alerts_status_check check (status in ('active', 'acknowledged'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'family_alerts_coordinates_check'
+      and conrelid = 'public.family_alerts'::regclass
+  ) then
+    alter table public.family_alerts add constraint family_alerts_coordinates_check
+      check (
+        ((latitude is null) = (longitude is null))
+        and (latitude is null or latitude between -90 and 90)
+        and (longitude is null or longitude between -180 and 180)
+      );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'family_alerts_situation_reason_check'
+      and conrelid = 'public.family_alerts'::regclass
+  ) then
+    alter table public.family_alerts add constraint family_alerts_situation_reason_check
+      check (situation_reason is null or char_length(situation_reason) between 1 and 300);
+  end if;
+end;
+$$;
+
+create index if not exists family_alerts_target_status_created_idx
+  on public.family_alerts (target_user_id, status, created_at desc);
+create index if not exists family_alerts_sender_status_created_idx
+  on public.family_alerts (user_id, status, created_at desc);
 
 create table if not exists public.locations (
   user_id uuid primary key references auth.users(id) on delete cascade default auth.uid(),
@@ -79,12 +142,6 @@ create policy "Users delete their own community posts"
   on public.community_posts for delete to authenticated
   using ((select auth.uid()) = user_id);
 
-drop policy if exists "Users manage their own SOS records" on public.family_alerts;
-create policy "Users manage their own SOS records"
-  on public.family_alerts for all to authenticated
-  using ((select auth.uid()) = user_id)
-  with check ((select auth.uid()) = user_id);
-
 drop policy if exists "Users manage their own location" on public.locations;
 create policy "Users manage their own location"
   on public.locations for all to authenticated
@@ -112,9 +169,26 @@ create table if not exists public.user_profiles (
   family_code text not null unique
     default upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 16)),
   share_location boolean not null default false,
+  notification_sound text not null default 'urgent-siren',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.user_profiles
+  add column if not exists notification_sound text not null default 'urgent-siren';
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'user_profiles_notification_sound_check'
+      and conrelid = 'public.user_profiles'::regclass
+  ) then
+    alter table public.user_profiles add constraint user_profiles_notification_sound_check
+      check (notification_sound in ('urgent-siren', 'pulse-chime', 'radar-beep', 'gentle-bell', 'custom'));
+  end if;
+end;
+$$;
 
 create or replace function public.lock_family_code()
 returns trigger
@@ -154,6 +228,46 @@ create table if not exists public.family_connections (
   primary key (member_a, member_b),
   check (member_a < member_b)
 );
+
+drop policy if exists "Users manage their own SOS records" on public.family_alerts;
+drop policy if exists "Users insert targeted family alerts" on public.family_alerts;
+create policy "Users insert targeted family alerts"
+  on public.family_alerts for insert to authenticated
+  with check (
+    (select auth.uid()) = user_id
+    and (target_user_id is null or (
+      target_user_id <> user_id
+      and exists (
+        select 1 from public.family_connections c
+        where (c.member_a = user_id and c.member_b = target_user_id)
+          or (c.member_b = user_id and c.member_a = target_user_id)
+      )
+    ))
+    and (kind <> 'sos' or (
+      status = 'active'
+      and situation_reason is not null
+      and latitude is not null
+      and longitude is not null
+    ))
+  );
+drop policy if exists "Users read their own and addressed family alerts" on public.family_alerts;
+create policy "Users read their own and addressed family alerts"
+  on public.family_alerts for select to authenticated
+  using (
+    (select auth.uid()) = user_id
+    or (
+      (target_user_id is null or target_user_id = (select auth.uid()))
+      and exists (
+        select 1 from public.family_connections c
+        where (c.member_a = user_id and c.member_b = (select auth.uid()))
+          or (c.member_b = user_id and c.member_a = (select auth.uid()))
+      )
+    )
+  );
+drop policy if exists "Users delete their own family alerts" on public.family_alerts;
+create policy "Users delete their own family alerts"
+  on public.family_alerts for delete to authenticated
+  using ((select auth.uid()) = user_id);
 
 create index if not exists family_connections_member_b_idx
   on public.family_connections (member_b);
@@ -425,6 +539,41 @@ as $$
   order by r.created_at desc;
 $$;
 
+create or replace function public.acknowledge_family_alert(p_alert_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_sender_id uuid;
+begin
+  if auth.uid() is null then
+    raise exception 'Sign in is required.';
+  end if;
+
+  update public.family_alerts a
+  set status = 'acknowledged',
+      acknowledged_by = auth.uid(),
+      acknowledged_at = now()
+  where a.id = p_alert_id
+    and a.kind = 'sos'
+    and a.status = 'active'
+    and a.user_id <> auth.uid()
+    and (a.target_user_id is null or a.target_user_id = auth.uid())
+    and exists (
+      select 1 from public.family_connections c
+      where (c.member_a = a.user_id and c.member_b = auth.uid())
+        or (c.member_b = a.user_id and c.member_a = auth.uid())
+    )
+  returning a.user_id into v_sender_id;
+
+  if v_sender_id is null then
+    raise exception 'Active SOS alert not found or not assigned to this account.';
+  end if;
+end;
+$$;
+
 revoke all on function public.can_view_family_location(uuid) from public, anon;
 revoke all on function public.lock_family_code() from public, anon;
 revoke all on function public.touch_location_updated_at() from public, anon;
@@ -433,12 +582,14 @@ revoke all on function public.request_family_connection(text) from public, anon;
 revoke all on function public.respond_to_family_request(uuid, boolean) from public, anon;
 revoke all on function public.get_family_members() from public, anon;
 revoke all on function public.get_family_requests() from public, anon;
+revoke all on function public.acknowledge_family_alert(uuid) from public, anon;
 grant execute on function public.can_view_family_location(uuid) to authenticated;
 grant execute on function public.lookup_family_code(text) to authenticated;
 grant execute on function public.request_family_connection(text) to authenticated;
 grant execute on function public.respond_to_family_request(uuid, boolean) to authenticated;
 grant execute on function public.get_family_members() to authenticated;
 grant execute on function public.get_family_requests() to authenticated;
+grant execute on function public.acknowledge_family_alert(uuid) to authenticated;
 
 do $$
 begin
