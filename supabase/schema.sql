@@ -39,10 +39,18 @@ create table if not exists public.family_alerts (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.locations (
+  user_id uuid primary key references auth.users(id) on delete cascade default auth.uid(),
+  latitude double precision not null check (latitude between -90 and 90),
+  longitude double precision not null check (longitude between -180 and 180),
+  updated_at timestamptz not null default now()
+);
+
 alter table public.tasks enable row level security;
 alter table public.family_events enable row level security;
 alter table public.community_posts enable row level security;
 alter table public.family_alerts enable row level security;
+alter table public.locations enable row level security;
 
 drop policy if exists "Users manage their own tasks" on public.tasks;
 create policy "Users manage their own tasks"
@@ -74,6 +82,12 @@ create policy "Users delete their own community posts"
 drop policy if exists "Users manage their own SOS records" on public.family_alerts;
 create policy "Users manage their own SOS records"
   on public.family_alerts for all to authenticated
+  using ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+drop policy if exists "Users manage their own location" on public.locations;
+create policy "Users manage their own location"
+  on public.locations for all to authenticated
   using ((select auth.uid()) = user_id)
   with check ((select auth.uid()) = user_id);
 

@@ -7,15 +7,120 @@ const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabase
 const cloudStatus = document.getElementById('cloud-status');
 const accountButton = document.getElementById('account-button');
 const signOutButton = document.getElementById('sign-out-button');
+const locationToggle = document.getElementById('route-toggle');
+const locationCopy = document.getElementById('route-copy');
+const locationStatus = document.getElementById('route-status');
+const locationUpdateStatus = document.getElementById('location-update-status');
 const taskIds = new Set();
 const calendarEventIds = new Set();
 let user = null;
 let taskQueue = Promise.resolve();
 let calendarQueue = Promise.resolve();
+let locationQueue = Promise.resolve();
+let locationWatchId = null;
+let lastLocationWriteAt = 0;
 let alertChannel;
 
 function setStatus(message) {
   cloudStatus.textContent = message;
+}
+
+function updateLocationUi(enabled, message) {
+  locationToggle.checked = enabled;
+  locationCopy.textContent = enabled ? 'Location tracking is on' : 'Location tracking is off';
+  locationStatus.textContent = enabled ? 'Location tracking is on' : 'Location tracking is off';
+  locationUpdateStatus.textContent = message;
+}
+
+async function stopLocationTracking({ removeSaved = true, userId = user?.id } = {}) {
+  if (locationWatchId !== null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(locationWatchId);
+  }
+  locationWatchId = null;
+  lastLocationWriteAt = 0;
+  updateLocationUi(false, 'Location tracking is off.');
+
+  if (!removeSaved || !userId || !supabase) return;
+
+  locationUpdateStatus.textContent = 'Tracking stopped. Removing the saved location…';
+  const removeSavedLocation = async () => {
+    const { error } = await supabase.from('locations').delete().eq('user_id', userId);
+    if (error) throw new Error(error.message);
+  };
+  locationQueue = locationQueue.then(removeSavedLocation, removeSavedLocation);
+  locationQueue = locationQueue.then(
+    () => {
+      locationUpdateStatus.textContent = 'Tracking stopped; the saved location was removed.';
+    },
+    error => {
+      const message = error instanceof Error ? error.message : String(error);
+      locationUpdateStatus.textContent = `Tracking stopped, but the saved location could not be removed: ${message}`;
+      window.toast('Could not remove the saved location from Supabase.');
+    }
+  );
+  await locationQueue;
+}
+
+function startLocationTracking() {
+  if (!supabase || !user) {
+    updateLocationUi(false, 'Sign in to save this device’s location to your account.');
+    window.toast('Sign in before starting location tracking.');
+    return;
+  }
+  if (!window.isSecureContext || !navigator.geolocation) {
+    updateLocationUi(false, 'Location tracking requires browser geolocation on a secure HTTPS page.');
+    window.toast('Location tracking is unavailable in this browser or connection.');
+    return;
+  }
+  if (locationWatchId !== null) return;
+
+  const trackingUserId = user.id;
+  lastLocationWriteAt = 0;
+  updateLocationUi(true, 'Waiting for a location fix. Coordinates are saved privately to your account.');
+  locationWatchId = navigator.geolocation.watchPosition(position => {
+    if (locationWatchId === null || user?.id !== trackingUserId) return;
+
+    const now = Date.now();
+    if (now - lastLocationWriteAt < 30000) return;
+    lastLocationWriteAt = now;
+    const row = {
+      user_id: trackingUserId,
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      updated_at: new Date(now).toISOString()
+    };
+
+    locationQueue = locationQueue.then(async () => {
+      if (locationWatchId === null || user?.id !== trackingUserId) return;
+      const { error } = await supabase.from('locations').upsert(row, { onConflict: 'user_id' });
+      if (error) {
+        void stopLocationTracking({ removeSaved: false });
+        updateLocationUi(false, `Location update failed: ${error.message}`);
+        window.toast(`Location update failed: ${error.message}`);
+        return;
+      }
+      locationUpdateStatus.textContent = `Location saved privately at ${new Date(row.updated_at).toLocaleTimeString()}.`;
+    }).catch(error => {
+      if (user?.id !== trackingUserId) return;
+      const message = error instanceof Error ? error.message : String(error);
+      void stopLocationTracking({ removeSaved: false });
+      updateLocationUi(false, `Location update failed: ${message}`);
+      window.toast(`Location update failed: ${message}`);
+    });
+  }, error => {
+    if (locationWatchId === null || user?.id !== trackingUserId) return;
+    if (error.code === 1) {
+      void stopLocationTracking({ userId: trackingUserId });
+      locationUpdateStatus.textContent = 'Location permission was denied. Allow access in your browser settings and try again.';
+    } else {
+      locationUpdateStatus.textContent = `Location error: ${error.message}`;
+      window.toast(`Location error: ${error.message}`);
+    }
+  }, {
+    enableHighAccuracy: true,
+    timeout: 15000,
+    maximumAge: 10000
+  });
 }
 
 function renderAccount() {
@@ -279,6 +384,7 @@ function subscribeToAlerts() {
 async function loadSession(session) {
   const nextUser = session?.user || null;
   if (user?.id !== nextUser?.id) {
+    if (locationWatchId !== null) await stopLocationTracking({ removeSaved: false });
     taskIds.clear();
     calendarEventIds.clear();
   }
@@ -389,7 +495,12 @@ document.getElementById('install-app').addEventListener('click', async () => {
 });
 
 document.getElementById('account-button').addEventListener('click', openAccountDialog);
+locationToggle.addEventListener('change', () => {
+  if (locationToggle.checked) startLocationTracking();
+  else void stopLocationTracking();
+});
 document.getElementById('sign-out-button').addEventListener('click', async () => {
+  if (locationWatchId !== null) await stopLocationTracking();
   const { error } = await supabase.auth.signOut();
   if (error) window.toast(error.message);
 });
