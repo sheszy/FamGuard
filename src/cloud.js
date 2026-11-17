@@ -52,8 +52,8 @@ function openAccountDialog() {
   let creatingAccount = false;
   window.modal({
     title: 'Sign in to FamGuard',
-    description: 'Use an email and password for this Supabase project.',
-    content: '<label class="eyebrow">Email<input class="input" id="auth-email" type="email" autocomplete="email" required></label><label class="eyebrow">Password<input class="input" id="auth-password" type="password" autocomplete="current-password" minlength="8" required></label><button class="text-link" id="auth-mode-toggle" type="button">Create an account instead</button>',
+    description: 'Continue with Google or use an email and password.',
+    content: '<button class="btn-secondary" id="google-sign-in" type="button">Continue with Google</button><label class="eyebrow">Email<input class="input" id="auth-email" type="email" autocomplete="email" required></label><label class="eyebrow">Password<input class="input" id="auth-password" type="password" autocomplete="current-password" minlength="8" required></label><button class="text-link" id="auth-mode-toggle" type="button">Create an account instead</button>',
     confirm: 'Sign in',
     onConfirm: async (box, close) => {
       const email = box.querySelector('#auth-email').value.trim();
@@ -78,6 +78,24 @@ function openAccountDialog() {
       } else {
         window.toast(creatingAccount ? 'Account created.' : 'Signed in.');
       }
+    }
+  });
+
+  document.getElementById('google-sign-in').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.origin }
+      });
+      if (error) {
+        button.disabled = false;
+        window.toast(`Google sign-in failed: ${error.message}`);
+      }
+    } catch (error) {
+      button.disabled = false;
+      window.toast(`Google sign-in failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   });
 
