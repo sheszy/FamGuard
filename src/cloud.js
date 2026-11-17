@@ -1,5 +1,6 @@
 import { playNotificationSound, stopNotificationSound } from './notificationSound.js';
 import { supabase } from './supabaseClient.js';
+import { registerPushSubscription, unregisterPushSubscription } from './utils/pushService.js';
 
 const cloudStatus = document.getElementById('cloud-status');
 const accountButton = document.getElementById('account-button');
@@ -33,6 +34,7 @@ let alertChannel;
 let familyChannel;
 let familyRefreshTimer;
 let sessionLoadSequence = 0;
+let registeredPushUserId = null;
 let profilePromptUserId = null;
 let selectedLocationUserId = null;
 let mappedLocationVersion = '';
@@ -127,10 +129,19 @@ function updateNotificationPermissionStatus() {
   }
 
   const permission = Notification.permission;
-  notificationPermissionStatus.textContent = `Browser notifications: ${permission}.`;
+  const pushReady = permission === 'granted' && user?.id && registeredPushUserId === user.id;
+  notificationPermissionStatus.textContent = pushReady
+    ? 'Browser notifications: granted. Background push is enabled.'
+    : permission === 'granted' && user
+      ? 'Browser notifications: granted. Set up background push for this device.'
+      : `Browser notifications: ${permission}.`;
   notificationPermissionStatus.className = `notification-status ${permission === 'granted' ? 'granted' : permission === 'denied' ? 'denied' : 'pending'}`;
-  enableNotificationsButton.hidden = permission === 'granted';
-  enableNotificationsButton.textContent = permission === 'denied' ? 'How to enable notifications' : 'Enable Notifications';
+  enableNotificationsButton.hidden = Boolean(pushReady);
+  enableNotificationsButton.textContent = permission === 'denied'
+    ? 'How to enable notifications'
+    : permission === 'granted' && user
+      ? 'Enable Background Push'
+      : 'Enable Notifications';
   enableNotificationsButton.disabled = false;
 }
 
@@ -1117,7 +1128,7 @@ async function showNativeSosNotification(alert) {
       body: `${alert.situation_reason} · GPS ${Number(alert.latitude).toFixed(5)}, ${Number(alert.longitude).toFixed(5)}`,
       icon: '/famguard-icon.png',
       badge: '/famguard-icon.png',
-      tag: `famguard-sos-${alert.id}`,
+      tag: 'famguard-sos',
       renotify: true,
       requireInteraction: true,
       actions: [
@@ -1210,7 +1221,7 @@ async function handleSosNotificationAction(alertId, action) {
 
 function handleSosDeepLink() {
   const params = new URLSearchParams(window.location.search);
-  const alertId = params.get('sosAlert');
+  const alertId = params.get('alertId') || params.get('sosAlert');
   if (!user || !alertId) return;
   const action = params.get('sosAction') || 'view-map';
   history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`);
@@ -1255,6 +1266,14 @@ async function loadSession(session) {
   const loadSequence = ++sessionLoadSequence;
   const nextUser = session?.user || null;
   if (user?.id !== nextUser?.id) {
+    registeredPushUserId = null;
+    if (user?.id) {
+      try {
+        await unregisterPushSubscription(user.id);
+      } catch (error) {
+        window.toast(`Background push subscription cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     if (familyRefreshTimer) clearInterval(familyRefreshTimer);
     familyRefreshTimer = null;
     if (familyChannel) supabase.removeChannel(familyChannel);
@@ -1279,6 +1298,7 @@ async function loadSession(session) {
   window.famguardUser = user;
   renderAccount();
   renderProfile();
+  updateNotificationPermissionStatus();
   if (!user) {
     if (alertChannel) supabase.removeChannel(alertChannel);
     alertChannel = null;
@@ -1294,6 +1314,17 @@ async function loadSession(session) {
     renderFamilyRequests();
     renderFamilyLocations();
     return;
+  }
+  if ('Notification' in window && Notification.permission === 'granted' && registeredPushUserId !== user.id) {
+    const registrationUserId = user.id;
+    void registerPushSubscription(registrationUserId).then(() => {
+      if (user?.id === registrationUserId) {
+        registeredPushUserId = registrationUserId;
+        updateNotificationPermissionStatus();
+      }
+    }).catch(error => {
+      window.toast(`Background push could not be refreshed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   await loadProfile();
@@ -1440,9 +1471,10 @@ function sendSos() {
       }
 
       confirmButton.disabled = true;
+      let data;
       let error;
       try {
-        ({ error } = await supabase.from('family_alerts').insert({
+        ({ data, error } = await supabase.from('family_alerts').insert({
           user_id: senderId,
           target_user_id: targetId,
           kind: 'sos',
@@ -1452,7 +1484,7 @@ function sendSos() {
           latitude: gpsFix.latitude,
           longitude: gpsFix.longitude,
           status: 'active'
-        }));
+        }).select('id').single());
       } catch (requestError) {
         error = requestError instanceof Error ? requestError : new Error(String(requestError));
       }
@@ -1468,6 +1500,20 @@ function sendSos() {
       }
       close();
       window.toast(`SOS sent to ${recipientName}. Your family will receive it while connected.`);
+      try {
+        const { data: pushResult, error: pushError } = await supabase.functions.invoke('send-sos-push', {
+          body: { alertId: data.id }
+        });
+        if (pushError) {
+          window.toast(`SOS saved, but background push failed: ${pushError.message}. Connected family members can still receive it in FamGuard.`);
+        } else if (pushResult?.failed > 0) {
+          window.toast(`SOS saved, but ${pushResult.failed} background push notification(s) could not be delivered.`);
+        } else if (pushResult?.sent === 0) {
+          window.toast('No family member has registered a background push subscription yet. Connected users can still receive the SOS in FamGuard.');
+        }
+      } catch (pushError) {
+        window.toast(`SOS saved, but background push failed: ${pushError instanceof Error ? pushError.message : String(pushError)}.`);
+      }
     }
   });
 
@@ -1523,9 +1569,18 @@ async function requestNotifications() {
   try {
     const permission = await Notification.requestPermission();
     updateNotificationPermissionStatus();
-    window.toast(permission === 'granted' ? 'Browser notifications are enabled.' : 'Notification permission was not granted.');
+    if (permission === 'granted' && user?.id) {
+      await registerPushSubscription(user.id);
+      registeredPushUserId = user.id;
+      updateNotificationPermissionStatus();
+      window.toast('Browser and background push notifications are enabled.');
+    } else if (permission === 'granted') {
+      window.toast('Browser notifications are enabled. Sign in to register for family push alerts.');
+    } else {
+      window.toast('Notification permission was not granted.');
+    }
   } catch (error) {
-    window.toast(`Notification permission could not be requested: ${error instanceof Error ? error.message : String(error)}`);
+    window.toast(`Notifications could not be enabled: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -1616,7 +1671,18 @@ locationToggle.addEventListener('change', () => {
   else void stopLocationTracking();
 });
 document.getElementById('sign-out-button').addEventListener('click', async () => {
+  const signingOutUserId = user?.id;
   if (locationWatchId !== null) await stopLocationTracking();
+  if (signingOutUserId) {
+    try {
+      await unregisterPushSubscription(signingOutUserId);
+    } catch (error) {
+      window.toast(`Background push subscription cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      registeredPushUserId = null;
+      updateNotificationPermissionStatus();
+    }
+  }
   const { error } = await supabase.auth.signOut();
   if (error) window.toast(error.message);
 });

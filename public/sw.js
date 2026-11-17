@@ -1,4 +1,4 @@
-const CACHE_NAME = 'famguard-shell-v10';
+const CACHE_NAME = 'famguard-shell-v11';
 const SHELL_FILES = ['/', '/manifest.webmanifest', '/famguard-icon.png'];
 
 self.addEventListener('install', event => {
@@ -34,7 +34,14 @@ self.addEventListener('fetch', event => {
 });
 
 self.addEventListener('push', event => {
-  let payload = { title: 'FamGuard', body: 'You have a family update.' };
+  let payload = {
+    title: 'FamGuard SOS',
+    body: 'A family member needs help.',
+    alertId: null,
+    senderName: 'A family member',
+    latitude: null,
+    longitude: null
+  };
   try {
     if (event.data) payload = { ...payload, ...event.data.json() };
   } catch {
@@ -45,7 +52,21 @@ self.addEventListener('push', event => {
     body: payload.body,
     icon: '/famguard-icon.png',
     badge: '/famguard-icon.png',
-    data: { url: payload.url || '/' }
+    requireInteraction: true,
+    vibrate: [500, 200, 500, 200, 800],
+    tag: 'famguard-sos',
+    renotify: true,
+    actions: [
+      { action: 'view-map', title: 'View on Map' },
+      { action: 'acknowledge', title: 'Acknowledge' }
+    ],
+    data: {
+      url: payload.url || '/#locations',
+      alertId: payload.alertId,
+      senderName: payload.senderName,
+      latitude: payload.latitude,
+      longitude: payload.longitude
+    }
   }));
 });
 
@@ -61,9 +82,9 @@ self.addEventListener('notificationclick', event => {
         existing.postMessage({ type: 'famguard:sos-action', alertId: data.alertId, action });
         return;
       }
-      const destination = new URL('/', self.location.origin);
-      destination.searchParams.set('sosAlert', data.alertId);
-      destination.searchParams.set('sosAction', action);
+      const destination = new URL(data.url || '/#locations', self.location.origin);
+      destination.searchParams.set('alertId', data.alertId);
+      if (action === 'acknowledge') destination.searchParams.set('sosAction', action);
       return self.clients.openWindow(destination.href);
     }
 
