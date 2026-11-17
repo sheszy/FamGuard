@@ -271,7 +271,7 @@ function subscribeToAlerts() {
           icon: '/famguard-icon.png'
         }));
       } else {
-        window.notify();
+        window.toast(`${alert.title}: ${alert.message}`);
       }
     }).subscribe();
 }
