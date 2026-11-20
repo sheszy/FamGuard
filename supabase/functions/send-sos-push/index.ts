@@ -33,10 +33,14 @@ function isSupportedPushEndpoint(endpoint: string) {
       && (!url.port || url.port === '443')
       && (
         host === 'fcm.googleapis.com'
+        || host === 'android.googleapis.com'
         || host === 'fcmregistrations.googleapis.com'
         || host === 'web.push.apple.com'
+        || host === 'push.apple.com'
         || host === 'push.services.mozilla.com'
         || host.endsWith('.push.services.mozilla.com')
+        || host === 'updates.push.services.mozilla.com'
+        || host === 'notify.windows.com'
         || host.endsWith('.notify.windows.com')
       );
   } catch {
@@ -126,7 +130,12 @@ Deno.serve(async request => {
 
     const vapidPublicKey = Deno.env.get('VAPID_PUBLIC_KEY');
     const vapidPrivateKey = Deno.env.get('VAPID_PRIVATE_KEY');
-    const vapidSubject = Deno.env.get('VAPID_SUBJECT');
+    const vapidSubjectValue = Deno.env.get('VAPID_SUBJECT')?.trim();
+    const vapidSubject = vapidSubjectValue
+      ? (/^(?:mailto:|https?:\/\/)/i.test(vapidSubjectValue)
+        ? vapidSubjectValue
+        : `mailto:${vapidSubjectValue}`)
+      : null;
     if (!vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
       console.error('VAPID server secrets are not configured.');
       return jsonResponse({ error: 'Push delivery is not configured on the server.' }, 500);
@@ -161,7 +170,10 @@ Deno.serve(async request => {
         await webPush.sendNotification({
           endpoint: subscription.endpoint,
           keys: { p256dh: subscription.p256dh, auth: subscription.auth }
-        }, payload);
+        }, payload, {
+          TTL: 300,
+          urgency: 'high'
+        });
         return 'sent';
       } catch (error) {
         const statusCode = (error as WebPushError).statusCode;
