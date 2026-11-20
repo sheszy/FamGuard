@@ -1471,10 +1471,9 @@ function sendSos() {
       }
 
       confirmButton.disabled = true;
-      let data;
       let error;
       try {
-        ({ data, error } = await supabase.from('family_alerts').insert({
+        ({ error } = await supabase.from('family_alerts').insert({
           user_id: senderId,
           target_user_id: targetId,
           kind: 'sos',
@@ -1484,7 +1483,7 @@ function sendSos() {
           latitude: gpsFix.latitude,
           longitude: gpsFix.longitude,
           status: 'active'
-        }).select('id').single());
+        }));
       } catch (requestError) {
         error = requestError instanceof Error ? requestError : new Error(String(requestError));
       }
@@ -1499,21 +1498,7 @@ function sendSos() {
         return;
       }
       close();
-      window.toast(`SOS sent to ${recipientName}. Your family will receive it while connected.`);
-      try {
-        const { data: pushResult, error: pushError } = await supabase.functions.invoke('send-sos-push', {
-          body: { alertId: data.id }
-        });
-        if (pushError) {
-          window.toast(`SOS saved, but background push failed: ${pushError.message}. Connected family members can still receive it in FamGuard.`);
-        } else if (pushResult?.failed > 0) {
-          window.toast(`SOS saved, but ${pushResult.failed} background push notification(s) could not be delivered.`);
-        } else if (pushResult?.sent === 0) {
-          window.toast('No family member has registered a background push subscription yet. Connected users can still receive the SOS in FamGuard.');
-        }
-      } catch (pushError) {
-        window.toast(`SOS saved, but background push failed: ${pushError instanceof Error ? pushError.message : String(pushError)}.`);
-      }
+      window.toast(`SOS alert sent to ${recipientName}.`);
     }
   });
 
