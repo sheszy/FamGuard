@@ -9,10 +9,15 @@ type PushSubscriptionRow = {
 };
 
 type WebPushError = Error & { statusCode?: number };
+type FamilyAlertInsertWebhook = {
+  type: 'INSERT';
+  table: 'family_alerts';
+  record: { id?: unknown };
+};
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-webhook-secret',
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
@@ -48,6 +53,15 @@ function isSupportedPushEndpoint(endpoint: string) {
   }
 }
 
+function isFamilyAlertInsertWebhook(body: unknown): body is FamilyAlertInsertWebhook {
+  if (!body || typeof body !== 'object') return false;
+  const payload = body as Record<string, unknown>;
+  return payload.type === 'INSERT'
+    && payload.table === 'family_alerts'
+    && !!payload.record
+    && typeof payload.record === 'object';
+}
+
 Deno.serve(async request => {
   if (request.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (request.method !== 'POST') return jsonResponse({ error: 'Method not allowed.' }, 405);
@@ -55,7 +69,9 @@ Deno.serve(async request => {
   try {
     const authorization = request.headers.get('authorization');
     const accessToken = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
-    if (!accessToken) return jsonResponse({ error: 'Sign in is required.' }, 401);
+    const webhookSecret = Deno.env.get('WEBHOOK_SECRET');
+    const isWebhookSecretValid = !!webhookSecret
+      && request.headers.get('x-webhook-secret') === webhookSecret;
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -67,18 +83,40 @@ Deno.serve(async request => {
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false }
     });
-    const { data: authData, error: authError } = await supabase.auth.getUser(accessToken);
-    const user = authData.user;
-    if (authError || !user) return jsonResponse({ error: 'The signed-in session is invalid.' }, 401);
+    const isServiceRoleToken = accessToken === serviceRoleKey;
+    let userId: string | null = null;
+    let authenticatedSenderName: string | null = null;
+    if (accessToken && !isServiceRoleToken) {
+      const { data: authData, error: authError } = await supabase.auth.getUser(accessToken);
+      if (!authError && authData.user) {
+        userId = authData.user.id;
+        const metadataName = authData.user.user_metadata?.full_name;
+        authenticatedSenderName = typeof metadataName === 'string'
+          ? metadataName
+          : authData.user.email || null;
+      } else if (!isWebhookSecretValid) {
+        return jsonResponse({ error: 'The signed-in session is invalid.' }, 401);
+      }
+    } else if (!accessToken && !isWebhookSecretValid) {
+      return jsonResponse({ error: 'Sign in is required.' }, 401);
+    }
 
     let requestBody: unknown;
     try {
       requestBody = await request.json();
     } catch {
+      if (!userId) return jsonResponse({ error: 'Sign in is required.' }, 401);
       return jsonResponse({ error: 'A valid alertId is required.' }, 400);
     }
-    const alertId = requestBody && typeof requestBody === 'object'
-      ? (requestBody as Record<string, unknown>).alertId
+    const isWebhookRequest = (isWebhookSecretValid || isServiceRoleToken)
+      && isFamilyAlertInsertWebhook(requestBody);
+    if (!userId && !isWebhookRequest) {
+      return jsonResponse({ error: 'Sign in is required.' }, 401);
+    }
+    const alertId = isWebhookRequest
+      ? requestBody.record.id
+      : requestBody && typeof requestBody === 'object'
+        ? (requestBody as Record<string, unknown>).alertId
       : null;
     if (typeof alertId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(alertId)) {
       return jsonResponse({ error: 'A valid alertId is required.' }, 400);
@@ -92,7 +130,7 @@ Deno.serve(async request => {
       console.error('Could not read the SOS alert:', alertError.message);
       return jsonResponse({ error: 'The SOS alert could not be verified.' }, 500);
     }
-    if (!alert || alert.user_id !== user.id || alert.kind !== 'sos' || alert.status !== 'active') {
+    if (!alert || (userId && alert.user_id !== userId) || alert.kind !== 'sos' || alert.status !== 'active') {
       return jsonResponse({ error: 'An active SOS alert owned by this account was not found.' }, 404);
     }
     if (!Number.isFinite(Number(alert.latitude)) || !Number.isFinite(Number(alert.longitude))) {
@@ -101,14 +139,14 @@ Deno.serve(async request => {
 
     const { data: connections, error: connectionError } = await supabase.from('family_connections')
       .select('member_a,member_b')
-      .or(`member_a.eq.${user.id},member_b.eq.${user.id}`);
+      .or(`member_a.eq.${alert.user_id},member_b.eq.${alert.user_id}`);
     if (connectionError) {
       console.error('Could not read SOS recipients:', connectionError.message);
       return jsonResponse({ error: 'Family recipients could not be loaded.' }, 500);
     }
 
     const connectedUserIds = new Set((connections || []).map(connection =>
-      connection.member_a === user.id ? connection.member_b : connection.member_a
+      connection.member_a === alert.user_id ? connection.member_b : connection.member_a
     ));
     let recipientIds = [...connectedUserIds];
     if (alert.target_user_id) {
@@ -142,10 +180,10 @@ Deno.serve(async request => {
     }
     webPush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
 
-    let senderName = user.user_metadata?.full_name || user.email || 'A family member';
+    let senderName = authenticatedSenderName || 'A family member';
     const { data: profile, error: profileError } = await supabase.from('user_profiles')
       .select('display_name')
-      .eq('user_id', user.id)
+      .eq('user_id', alert.user_id)
       .maybeSingle();
     if (profileError) console.error('Could not load SOS sender profile:', profileError.message);
     if (profile?.display_name) senderName = profile.display_name;
