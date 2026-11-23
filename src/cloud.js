@@ -1,6 +1,38 @@
 import { playNotificationSound, stopNotificationSound } from './notificationSound.js';
 import { supabase } from './supabaseClient.js';
 import { registerPushSubscription, unregisterPushSubscription } from './utils/pushService.js';
+import { App } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
+import { Capacitor } from '@capacitor/core';
+
+if (Capacitor.isNativePlatform() && supabase) {
+  void App.addListener('appUrlOpen', async ({ url }) => {
+    let callback;
+    try {
+      callback = new URL(url);
+    } catch {
+      return;
+    }
+    if (callback.protocol !== 'com.famguard.app:' || callback.hostname !== 'callback') return;
+
+    const code = callback.searchParams.get('code');
+    const oauthError = callback.searchParams.get('error_description');
+    try {
+      if (oauthError) throw new Error(oauthError);
+      if (!code) throw new Error('The Google sign-in callback did not include an authorization code.');
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      if (error) throw error;
+      document.getElementById('overlay-root')?.replaceChildren();
+      window.toast('Signed in with Google.');
+    } catch (error) {
+      window.toast(`Google sign-in failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await Browser.close().catch(error => {
+        window.toast(`The sign-in browser could not be closed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  });
+}
 
 const cloudStatus = document.getElementById('cloud-status');
 const accountButton = document.getElementById('account-button');
@@ -887,17 +919,21 @@ function openAccountDialog() {
     const button = event.currentTarget;
     button.disabled = true;
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      const native = Capacitor.isNativePlatform();
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: window.location.origin,
+          redirectTo: native ? 'com.famguard.app://callback' : window.location.origin,
           scopes: 'https://www.googleapis.com/auth/calendar.events',
-          queryParams: { access_type: 'offline', prompt: 'consent' }
+          queryParams: { access_type: 'offline', prompt: 'consent' },
+          ...(native ? { skipBrowserRedirect: true } : {})
         }
       });
       if (error) {
         button.disabled = false;
         window.toast(`Google sign-in failed: ${error.message}`);
+      } else if (native && data.url) {
+        await Browser.open({ url: data.url });
       }
     } catch (error) {
       button.disabled = false;

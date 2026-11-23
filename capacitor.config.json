@@ -1,0 +1,8 @@
+{
+  "appId": "com.famguard.app",
+  "appName": "FamGuard",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}

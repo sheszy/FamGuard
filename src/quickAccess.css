@@ -1,0 +1,36 @@
+.home-calendar-handle{display:flex;width:100%;min-height:38px;align-items:center;justify-content:center;gap:9px;margin:0 0 12px;padding:7px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--muted);cursor:grab;font-size:10px;touch-action:pan-x}
+.home-calendar-handle:active{cursor:grabbing}
+.home-calendar-grip{display:block;width:34px;height:4px;border-radius:4px;background:#aab5ac}
+header.topbar .topbar-brand{touch-action:pan-x}
+.home-calendar-top-button svg{width:18px;height:18px}
+.calendar-overlay-backdrop{position:fixed;inset:0;z-index:69;border:0;background:#18231c99;opacity:0;transition:opacity .28s ease}
+.calendar-overlay-backdrop[hidden]{display:none}
+.calendar-overlay-backdrop.is-visible{opacity:1}
+#view-calendar.calendar-overlay-open,#view-calendar.calendar-overlay-closing{position:fixed;inset:0 0 calc(20px + env(safe-area-inset-bottom)) 0;z-index:70;width:auto;margin:0;padding:clamp(12px,3vh,28px) clamp(18px,4vw,56px) 36px;overflow-y:auto;overscroll-behavior:contain;border-radius:0 0 10px 10px;background:var(--paper);box-shadow:0 16px 40px #18231c35;animation:calendar-slide-down .32s cubic-bezier(.2,.7,.2,1) both}
+#view-calendar.calendar-overlay-closing{animation:calendar-slide-up .28s cubic-bezier(.4,0,.8,.3) both;pointer-events:none}
+.calendar-overlay-controls{display:none}
+#view-calendar.calendar-overlay-open .calendar-overlay-controls,#view-calendar.calendar-overlay-closing .calendar-overlay-controls{position:sticky;top:calc(-1 * clamp(12px,3vh,28px));z-index:2;display:flex;min-height:42px;align-items:center;justify-content:center;margin:-1px 0 12px}
+.calendar-overlay-grab{display:grid;width:90px;height:40px;place-items:center;border:0;background:transparent;cursor:grab;touch-action:pan-x}
+.calendar-overlay-grab:active{cursor:grabbing}
+.calendar-overlay-close{position:absolute;right:0}
+@keyframes calendar-slide-down{from{transform:translateY(-100%)}to{transform:translateY(0)}}
+@keyframes calendar-slide-up{from{transform:translateY(0)}to{transform:translateY(-100%)}}
+.reschedule-controls{display:inline-flex;flex-wrap:wrap;gap:6px}
+.reschedule-controls .btn-secondary{min-height:30px}
+.floating-launcher{position:fixed;right:14px;bottom:calc(76px + env(safe-area-inset-bottom));z-index:45}
+.floating-launcher[hidden],.floating-launcher-panel[hidden]{display:none}
+.floating-launcher-trigger{display:grid;width:54px;height:54px;place-items:center;border:2px solid #fff;border-radius:50%;background:var(--dark);color:white;box-shadow:0 5px 18px #24111b45;cursor:grab;font:800 12px var(--display);touch-action:none}
+.floating-launcher-panel{position:absolute;right:0;bottom:64px;width:min(290px,calc(100vw - 28px));padding:10px;border:1px solid var(--line);border-radius:9px;background:#fff;box-shadow:0 14px 36px #24111b35}
+.floating-launcher-panel[data-mode=grid]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.floating-launcher-panel[data-mode=drawer]{display:grid;gap:5px;max-height:65vh;overflow:auto}
+.floating-launcher-panel[hidden]{display:none}
+.floating-launcher-action{display:grid;min-height:64px;place-items:center;gap:5px;padding:7px 4px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);cursor:pointer;font-size:9px;text-align:center}
+.floating-launcher-action:hover{background:var(--pale)}
+.floating-launcher-panel[data-mode=drawer] .floating-launcher-action{min-height:40px;grid-template-columns:26px 1fr;justify-items:start;padding:7px 10px;font-size:11px;text-align:left}
+.floating-launcher-action span:first-child{font-size:18px}
+.floating-launcher-panel[data-mode=drawer] .floating-launcher-action span:first-child{font-size:16px}
+.floating-launcher-mode{margin-top:10px}
+.floating-launcher-mode select{margin-top:5px}
+@media(max-width:760px){body .mobile-nav{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:520px){.floating-launcher{right:12px;bottom:calc(80px + env(safe-area-inset-bottom))}.reschedule-controls{width:100%}#view-calendar.calendar-overlay-open,#view-calendar.calendar-overlay-closing{bottom:calc(14px + env(safe-area-inset-bottom));padding:10px 14px 28px}#view-calendar.calendar-overlay-open .calendar-overlay-controls,#view-calendar.calendar-overlay-closing .calendar-overlay-controls{top:-10px}}
+@media(prefers-reduced-motion:reduce){#view-calendar.calendar-overlay-open,#view-calendar.calendar-overlay-closing,.calendar-overlay-backdrop{animation:none;transition:none}}

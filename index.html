@@ -172,7 +172,7 @@
       items.sort((a,b)=>a.date.localeCompare(b.date)||(a.time||'').localeCompare(b.time||''));
       if(!items.length){const empty=document.createElement('p');empty.className='eyebrow';empty.textContent='No upcoming dates yet. Import a contacts CSV or add a family event.';list.append(empty);return}
       items.slice(0,8).forEach(item=>{
-        const note=document.createElement('div');note.className='event-note';
+        const note=document.createElement('div');note.className='event-note';note.dataset.itemId=item.id;note.dataset.itemType=item.type;note.dataset.itemDate=item.date;note.dataset.recurring=String(Boolean(item.recurring));
         const dot=document.createElement('span');dot.className=`event-dot${item.type==='anniversary'?' anniversary':''}${item.type==='task'?' task':''}`;
         const meta=document.createElement('span');meta.className='event-meta';
         const title=document.createElement('strong');title.textContent=item.title;
@@ -231,6 +231,8 @@
     document.getElementById('post-list').addEventListener('click',e=>{const b=e.target.closest('.like-button,.reply-button');if(!b)return;if(b.classList.contains('like-button')){const count=b.querySelector('span');count.textContent=Number(count.textContent)+1;b.disabled=true;b.style.color='var(--coral)';toast('Marked as helpful.')}else toast('Replies are available in the community demo.')});
     document.getElementById('skip-splash').onclick=()=>document.getElementById('splash').classList.add('hidden');renderTasks();renderCalendar();setTimeout(()=>document.getElementById('splash').classList.add('hidden'),2400);
   </script>
+  <script type="module" src="/src/calendarControls.js"></script>
+  <script type="module" src="/src/quickAccess.js"></script>
   <script type="module" src="/src/cloud.js"></script>
 </body>
 </html>

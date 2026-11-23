@@ -134,6 +134,32 @@ function toDateKey(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
 }
 
+export function rescheduleDate(value, amount, unit) {
+  const dateKey = toDateKey(value);
+  if (!dateKey || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    throw new Error('Choose a valid calendar date before rescheduling.');
+  }
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const date = new Date(year, month - 1, day, 12);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    throw new Error('Choose a valid calendar date before rescheduling.');
+  }
+  if (!Number.isInteger(amount) || amount < 1 || !['week', 'month'].includes(unit)) {
+    throw new Error('Choose a valid reschedule interval.');
+  }
+
+  if (unit === 'week') {
+    date.setDate(date.getDate() + amount * 7);
+  } else {
+    const targetMonth = date.getMonth() + amount;
+    const lastDay = new Date(date.getFullYear(), targetMonth + 1, 0).getDate();
+    date.setDate(1);
+    date.setMonth(targetMonth);
+    date.setDate(Math.min(day, lastDay));
+  }
+  return toDateKey(date);
+}
+
 export function findVacantDate(events, tasks, startDate = new Date(), horizonDays = 90, excludeTaskId = null) {
   const firstDay = toDateKey(startDate);
   if (!firstDay || !Number.isInteger(horizonDays) || horizonDays < 1) return null;

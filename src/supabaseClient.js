@@ -1,7 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
+import { Capacitor } from '@capacitor/core';
 
 const env = import.meta.env || {};
 const supabaseUrl = env.VITE_SUPABASE_URL?.trim();
 const supabaseKey = env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim() || env.VITE_SUPABASE_ANON_KEY?.trim();
 
-export const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+export const supabase = supabaseUrl && supabaseKey
+  ? createClient(supabaseUrl, supabaseKey, {
+    auth: { flowType: Capacitor.isNativePlatform() ? 'pkce' : 'implicit' }
+  })
+  : null;

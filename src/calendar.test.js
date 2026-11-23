@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findVacantDate, parseKeyDatesCsv } from './calendar.js';
+import { findVacantDate, parseKeyDatesCsv, rescheduleDate } from './calendar.js';
 
 test('imports recurring dates from quoted contact names and common date formats', () => {
   const result = parseKeyDatesCsv(
@@ -43,4 +43,15 @@ test('ignores the task being rescheduled and returns null when every date is bus
     findVacantDate([], [{ id: 'stay', scheduledFor: '2026-05-04', done: false }], '2026-05-04', 1, 'move-me'),
     null
   );
+});
+
+test('reschedules dates by week or month and clamps end-of-month dates', () => {
+  assert.equal(rescheduleDate('2026-05-04', 1, 'week'), '2026-05-11');
+  assert.equal(rescheduleDate('2026-01-31', 1, 'month'), '2026-02-28');
+  assert.equal(rescheduleDate('2028-01-31', 1, 'month'), '2028-02-29');
+});
+
+test('rejects invalid calendar dates and reschedule intervals', () => {
+  assert.throws(() => rescheduleDate('2026-02-30', 1, 'week'), /valid calendar date/);
+  assert.throws(() => rescheduleDate('2026-02-28', 0, 'month'), /valid reschedule interval/);
 });
